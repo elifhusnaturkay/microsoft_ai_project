@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from rag.generator import answer_query, build_context_and_sources, parse_segments
+from rag.generator import answer_query, build_context_and_sources, parse_segments, translate_query_for_retrieval
 
 
 def test_build_context_and_sources_numbers_by_distinct_source_not_chunk():
@@ -91,3 +91,23 @@ def test_answer_query_returns_segments_and_sources_shape():
 
     assert result["sources"] == [{"name": "Cost of Attendance", "url": "https://x/a"}]
     assert result["segments"] == [{"txt": "Tuition is $41,860 "}, {"c": 1}, {"txt": "."}]
+
+
+def test_translate_query_for_retrieval_returns_backend_output():
+    class FakeBackend:
+        def generate(self, system_prompt, user_prompt):
+            assert user_prompt == "yillik maliyet ne kadar?"
+            assert "English" in system_prompt
+            return "What is the annual cost?"
+
+    result = translate_query_for_retrieval("yillik maliyet ne kadar?", FakeBackend())
+    assert result == "What is the annual cost?"
+
+
+def test_translate_query_for_retrieval_falls_back_to_original_on_empty_response():
+    class EmptyBackend:
+        def generate(self, system_prompt, user_prompt):
+            return "   "
+
+    result = translate_query_for_retrieval("some question", EmptyBackend())
+    assert result == "some question"

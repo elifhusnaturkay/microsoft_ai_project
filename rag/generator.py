@@ -233,6 +233,31 @@ def get_chat_backend(backend: str = None) -> ChatBackend:
     raise ValueError(f"Unknown chat backend: {backend!r} (expected 'foundry' or 'ollama')")
 
 
+_TRANSLATE_SYSTEM_PROMPT = (
+    "Translate the user's message to English. Reply with ONLY the translated text -- "
+    "no quotes, no explanation, no extra commentary. If it's already in English, repeat "
+    "it unchanged."
+)
+
+
+def translate_query_for_retrieval(question: str, backend: ChatBackend) -> str:
+    """Translate a non-English question to English before embedding it for retrieval.
+
+    Why this exists: the knowledge base (docs/) is English-only, and measured directly
+    against this project's real docs/knowledge.db, the local embedding models actually
+    available (nomic-embed-text, mxbai-embed-large via Ollama) retrieve poorly for a
+    Turkish query -- e.g. "yillik maliyet ne kadar?" scored ~0.40 similarity against every
+    candidate chunk (no clear winner, effectively noise), while the same question translated
+    to English scored 0.53-0.65 against the correct chunk. Translating first decouples
+    retrieval quality from a given embedding backend's cross-lingual ability -- useful for
+    the Ollama fallback today, and cheap insurance if qwen3-embedding-0.6b via Foundry Local
+    turns out to need it too. The ORIGINAL question (not this translation) is still what
+    gets passed to answer_query, so the model answers in the user's own language/phrasing.
+    """
+    translated = backend.generate(_TRANSLATE_SYSTEM_PROMPT, question).strip()
+    return translated or question
+
+
 def answer_query(
     question: str,
     chunks: List[Dict],

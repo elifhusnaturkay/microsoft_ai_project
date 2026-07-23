@@ -17,7 +17,7 @@ from pydantic import BaseModel
 
 from rag import config, store
 from rag.embedder import get_embedder
-from rag.generator import answer_query
+from rag.generator import answer_query, get_chat_backend, translate_query_for_retrieval
 from rag.retriever import get_top_chunks
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -54,13 +54,23 @@ def ask(request: AskRequest):
     if not question:
         return {"segments": [], "sources": []}
 
+    chat_backend = get_chat_backend()
+
+    # docs/ is English-only; retrieve using an English version of the question so
+    # retrieval quality doesn't depend on the embedding backend's cross-lingual ability
+    # (see rag/generator.py's translate_query_for_retrieval docstring for measurements).
+    # The ORIGINAL question is still what answer_query sees below.
+    retrieval_query = question
+    if language != "en":
+        retrieval_query = translate_query_for_retrieval(question, chat_backend)
+
     embedder = _get_embedder()
     conn = _get_db_connection()
-    chunks = get_top_chunks(question, embedder, conn, k=config.TOP_K)
+    chunks = get_top_chunks(retrieval_query, embedder, conn, k=config.TOP_K)
     if not chunks:
         return {"segments": [], "sources": []}
 
-    return answer_query(question, chunks, language=language)
+    return answer_query(question, chunks, language=language, backend=chat_backend)
 
 
 # Registered last: an explicit route above (like /api/ask) always wins over this
