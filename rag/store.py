@@ -15,8 +15,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS chunks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_file TEXT,
-    source_name TEXT,
-    source_url TEXT,
+    sources TEXT NOT NULL,
     content TEXT NOT NULL,
     embedding BLOB NOT NULL
 );
@@ -46,30 +45,37 @@ def _deserialize_embedding(blob: bytes) -> np.ndarray:
     return np.array(json.loads(blob.decode("utf-8")), dtype=np.float32)
 
 
+def _serialize_sources(sources: List[Dict]) -> str:
+    return json.dumps(sources or [])
+
+
+def _deserialize_sources(raw: str) -> List[Dict]:
+    return json.loads(raw) if raw else []
+
+
 def insert_chunk(
     conn: sqlite3.Connection,
     source_file: str,
-    source_name: str,
-    source_url: str,
+    sources: List[Dict],
     content: str,
     embedding: np.ndarray,
 ) -> None:
     conn.execute(
-        "INSERT INTO chunks (source_file, source_name, source_url, content, embedding) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (source_file, source_name, source_url, content, _serialize_embedding(embedding)),
+        "INSERT INTO chunks (source_file, sources, content, embedding) VALUES (?, ?, ?, ?)",
+        (source_file, _serialize_sources(sources), content, _serialize_embedding(embedding)),
     )
 
 
 def insert_chunks(conn: sqlite3.Connection, chunks: List[Dict]) -> None:
     """Bulk-insert chunks as produced by chunker.py, each augmented with an 'embedding' key
-    (see scripts/ingest.py, which is what wires embedder.py's output onto each chunk dict)."""
+    (see scripts/ingest.py, which is what wires embedder.py's output onto each chunk dict).
+    Each chunk carries a `sources` list (chunker.py may merge paragraphs from more than one
+    source into a single chunk -- see rag/chunker.py's module docstring)."""
     for chunk in chunks:
         insert_chunk(
             conn,
             chunk.get("source_file"),
-            chunk.get("source_name"),
-            chunk.get("source_url"),
+            chunk.get("sources", []),
             chunk["text"],
             chunk["embedding"],
         )
@@ -78,17 +84,14 @@ def insert_chunks(conn: sqlite3.Connection, chunks: List[Dict]) -> None:
 
 def get_all_chunks(conn: sqlite3.Connection) -> List[Dict]:
     """Fetch every stored chunk with its embedding deserialized back to a numpy array."""
-    cursor = conn.execute(
-        "SELECT id, source_file, source_name, source_url, content, embedding FROM chunks"
-    )
+    cursor = conn.execute("SELECT id, source_file, sources, content, embedding FROM chunks")
     rows = []
-    for row_id, source_file, source_name, source_url, content, blob in cursor.fetchall():
+    for row_id, source_file, sources_raw, content, blob in cursor.fetchall():
         rows.append(
             {
                 "id": row_id,
                 "source_file": source_file,
-                "source_name": source_name,
-                "source_url": source_url,
+                "sources": _deserialize_sources(sources_raw),
                 "content": content,
                 "embedding": _deserialize_embedding(blob),
             }

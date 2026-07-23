@@ -4,14 +4,17 @@ numpy>=1.26
 pypdf>=4.2          # PDF text extraction for docs/*.pdf
 
 # Local inference backends
-# TODO: verify the exact pip package name for Microsoft Foundry Local's Python SDK before
-# running `pip install -r requirements.txt` for real. PROJECT_PLAN.md's own setup notes
-# (see "Adim 1: Ortam Kurulumu") reference `pip install foundry-local-sdk` and
-# `from foundry_local import FoundryLocalManager`, which is what's pinned below, but this
-# has not been independently confirmed against PyPI in this pass -- double check the
-# package exists and this is the current name before relying on it.
-foundry-local-sdk
-openai>=1.30        # Foundry Local exposes an OpenAI-compatible local endpoint (see rag/embedder.py, rag/generator.py TODOs)
+# Pinned to 0.5.1 deliberately, NOT the latest release: foundry-local-sdk had a breaking
+# API redesign at 1.0.0 (package/import renamed foundry_local -> foundry_local_sdk, and
+# the simple FoundryLocalManager(alias).endpoint/.api_key + plain openai.OpenAI(...) client
+# pattern was replaced by a singleton Configuration/native-interop API). Verified by
+# downloading and inspecting both wheels directly: 0.5.1 is the last version matching the
+# `from foundry_local import FoundryLocalManager` + `.endpoint`/`.api_key`/`.get_model_info()`
+# pattern that rag/embedder.py and rag/generator.py are written against. If you deliberately
+# want the 1.0+ SDK, embedder.py/generator.py's Foundry classes need a rewrite against its
+# Configuration/EmbeddingClient/ChatClient API instead.
+foundry-local-sdk==0.5.1
+openai>=1.30        # Foundry Local exposes an OpenAI-compatible local endpoint (see rag/embedder.py, rag/generator.py)
 
 # Ollama fallback (see PROJECT_PLAN.md "Yedek Plan"). The `ollama` package is optional --
 # rag/embedder.py and rag/generator.py talk to the local Ollama HTTP API directly via `requests`,

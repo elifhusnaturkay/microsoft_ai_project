@@ -8,19 +8,16 @@ retriever.py) never hardcodes a specific SDK call:
 - OllamaEmbedder: fallback if Foundry Local has issues (also a locked decision, see
   PROJECT_PLAN.md "Yedek Plan").
 
-TODO -- verify before real ingestion runs:
-    PROJECT_PLAN.md's own environment-check snippet only demonstrates loading a *chat*
-    model via `FoundryLocalManager().get_model("phi-3.5-mini")`; it does not document how
-    to request *embeddings* for qwen3-embedding-0.6b. The implementation below assumes
-    Foundry Local exposes an OpenAI-compatible local endpoint (a documented pattern for
-    Foundry Local's chat models) and that the same endpoint serves `.embeddings.create(...)`
-    for the embedding model. That assumption is NOT independently confirmed in this pass --
-    once `foundry-local-sdk` is actually installed and running, check its real API
-    (`FoundryLocalManager`, `manager.endpoint`, `manager.api_key`, `manager.get_model_info`)
-    and adjust `FoundryLocalEmbedder._ensure_client` / `.embed` accordingly. If Foundry Local
-    doesn't serve qwen3-embedding-0.6b this way, switch RAG_EMBED_BACKEND=ollama in the
-    meantime (see rag/config.py) -- the rest of the pipeline doesn't care which backend
-    is behind this interface.
+Verified against the real foundry-local-sdk==0.5.1 source (downloaded and inspected the
+wheel directly -- see requirements.txt for why that exact version is pinned): its
+`FoundryLocalManager(alias, bootstrap=True)` constructor asserts Foundry Local is
+installed, starts the service, downloads and loads the given model, and exposes
+`.endpoint` (an OpenAI-compatible `{service_uri}/v1` base URL good for chat AND embedding
+models alike) plus `.api_key` and `.get_model_info(alias).id` (the concrete loaded model
+ID required by the OpenAI-compatible request payload). `FoundryLocalEmbedder._ensure_client`
+below matches that API exactly. Note: foundry-local-sdk had a breaking API redesign at
+1.0.0 (package renamed foundry_local_sdk, singleton Configuration/native-interop design) --
+this module is written against the pre-1.0 API on purpose, see requirements.txt.
 """
 from abc import ABC, abstractmethod
 from typing import List, Sequence
@@ -72,15 +69,12 @@ class FoundryLocalEmbedder(Embedder):
                 "OpenAI-compatible endpoint. Run `pip install openai`."
             ) from e
 
-        # TODO: confirm this against the real foundry-local-sdk API -- see module docstring.
         manager = FoundryLocalManager(self.model_name)
-        self._model_id = manager.get_model_info(self.model_name).id
+        self._model_id = manager.get_model_info(self.model_name, raise_on_not_found=True).id
         self._client = OpenAI(base_url=manager.endpoint, api_key=manager.api_key)
 
     def embed(self, texts: Sequence[str]) -> np.ndarray:
         self._ensure_client()
-        # TODO: confirm Foundry Local actually serves qwen3-embedding-0.6b through
-        # `.embeddings.create` on the OpenAI-compatible endpoint -- see module docstring.
         response = self._client.embeddings.create(model=self._model_id, input=list(texts))
         vectors = [item.embedding for item in response.data]
         return np.array(vectors, dtype=np.float32)

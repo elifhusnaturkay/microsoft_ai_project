@@ -68,12 +68,13 @@ def test_chunk_document_preserves_source_metadata_and_word_count():
     assert len(chunks) == 1
     chunk = chunks[0]
     assert chunk["source_file"] == "tuition_fees.md"
-    assert chunk["source_name"] == "SHSU Cost of Attendance"
-    assert chunk["source_url"] == "https://www.shsu.edu/cost-aid/cost-attendance"
+    assert chunk["sources"] == [
+        {"name": "SHSU Cost of Attendance", "url": "https://www.shsu.edu/cost-aid/cost-attendance"}
+    ]
     assert chunk["word_count"] == 250
 
 
-def test_chunk_documents_aggregates_across_multiple_documents():
+def test_chunk_documents_aggregates_across_multiple_files():
     documents = [
         {"text": _words("a", 220), "source_file": "d1.md", "source_name": "D1", "source_url": None},
         {"text": _words("b", 220), "source_file": "d2.md", "source_name": "D2", "source_url": None},
@@ -82,3 +83,58 @@ def test_chunk_documents_aggregates_across_multiple_documents():
 
     assert len(chunks) == 2
     assert {c["source_file"] for c in chunks} == {"d1.md", "d2.md"}
+    assert chunks[0]["sources"] == [{"name": "D1", "url": None}]
+    assert chunks[1]["sources"] == [{"name": "D2", "url": None}]
+
+
+def test_chunk_documents_merges_small_adjacent_sections_from_the_same_file():
+    # Mirrors real docs/*.md files like faq_practical.md: several short `---`-separated
+    # sections (each its own source) in ONE file, none reaching MIN_CHUNK_WORDS alone.
+    documents = [
+        {
+            "text": _words("alpha", 80),
+            "source_file": "faq_practical.md",
+            "source_name": "Source A",
+            "source_url": "https://example.com/a",
+        },
+        {
+            "text": _words("beta", 80),
+            "source_file": "faq_practical.md",
+            "source_name": "Source B",
+            "source_url": "https://example.com/b",
+        },
+        {
+            "text": _words("gamma", 80),
+            "source_file": "faq_practical.md",
+            "source_name": "Source C",
+            "source_url": "https://example.com/c",
+        },
+    ]
+    chunks = chunk_documents(documents, min_words=200, max_words=500)
+
+    # All three tiny sections (240 words total) should merge into a single, properly
+    # sized chunk that lists all three sources rather than three ~80-word orphan chunks.
+    assert len(chunks) == 1
+    chunk = chunks[0]
+    assert chunk["word_count"] == 240
+    assert chunk["sources"] == [
+        {"name": "Source A", "url": "https://example.com/a"},
+        {"name": "Source B", "url": "https://example.com/b"},
+        {"name": "Source C", "url": "https://example.com/c"},
+    ]
+
+
+def test_chunk_documents_never_merges_across_different_files():
+    # Two files, each with a single tiny section -- must stay as two separate chunks
+    # even though merging them would meet the word-count minimum.
+    documents = [
+        {"text": _words("alpha", 80), "source_file": "a.md", "source_name": "A", "source_url": None},
+        {"text": _words("beta", 80), "source_file": "b.md", "source_name": "B", "source_url": None},
+    ]
+    chunks = chunk_documents(documents, min_words=200, max_words=500)
+
+    assert len(chunks) == 2
+    assert chunks[0]["source_file"] == "a.md"
+    assert chunks[0]["sources"] == [{"name": "A", "url": None}]
+    assert chunks[1]["source_file"] == "b.md"
+    assert chunks[1]["sources"] == [{"name": "B", "url": None}]

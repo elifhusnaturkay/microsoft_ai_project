@@ -23,10 +23,9 @@ hallucinated links), that footer is assembled programmatically in `answer_query`
 model generates. The system prompt asks the model to focus on answering from context and
 not invent a sources list of its own.
 
-TODO -- same caveat as embedder.py: the Foundry Local chat-completion call below follows
-the OpenAI-compatible-endpoint pattern (documented for Foundry Local's chat models) but has
-not been independently verified against a running foundry-local-sdk install in this pass.
-Verify `FoundryLocalChat._ensure_client` / `.generate` once the SDK is actually installed.
+The Foundry Local chat-completion call below is verified against the real
+foundry-local-sdk==0.5.1 source (see rag/embedder.py's module docstring and
+requirements.txt for details on why that exact pre-1.0 version is pinned).
 """
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional
@@ -62,13 +61,22 @@ def get_system_prompt(language: str) -> str:
     return SYSTEM_PROMPT_TR if language == "tr" else SYSTEM_PROMPT_EN
 
 
+def _format_source_label(source: Dict) -> str:
+    name = source.get("name") or "unknown source"
+    return f"{name} ({source['url']})" if source.get("url") else name
+
+
 def format_context_with_sources(chunks: List[Dict]) -> str:
-    """Render retrieved chunks into a numbered context block for the prompt."""
+    """Render retrieved chunks into a numbered context block for the prompt. A chunk may
+    carry more than one source (chunker.py merges small adjacent sections together) --
+    all of them are listed so the model sees exactly what it's allowed to cite."""
     blocks = []
     for i, chunk in enumerate(chunks, start=1):
-        label = chunk.get("source_name") or chunk.get("source_file") or "unknown source"
-        if chunk.get("source_url"):
-            label = f"{label} ({chunk['source_url']})"
+        sources = chunk.get("sources") or []
+        if sources:
+            label = "; ".join(_format_source_label(src) for src in sources)
+        else:
+            label = chunk.get("source_file") or "unknown source"
         blocks.append(f"[{i}] {label}\n{chunk.get('content') or chunk.get('text', '')}")
     return "\n\n".join(blocks)
 
@@ -79,17 +87,22 @@ def build_user_prompt(question: str, chunks: List[Dict]) -> str:
 
 
 def _unique_sources(chunks: List[Dict]) -> List[Dict]:
-    """Dedupe (source_name, source_url) pairs across retrieved chunks, preserving order."""
+    """Dedupe (name, url) pairs across every source in every retrieved chunk, preserving
+    first-seen order. A single chunk may itself list more than one source."""
     seen = set()
     sources = []
     for chunk in chunks:
-        name = chunk.get("source_name") or chunk.get("source_file") or "unknown source"
-        url = chunk.get("source_url")
-        key = (name, url)
-        if key in seen:
-            continue
-        seen.add(key)
-        sources.append({"name": name, "url": url})
+        chunk_sources = chunk.get("sources") or [
+            {"name": chunk.get("source_file") or "unknown source", "url": None}
+        ]
+        for src in chunk_sources:
+            name = src.get("name") or chunk.get("source_file") or "unknown source"
+            url = src.get("url")
+            key = (name, url)
+            if key in seen:
+                continue
+            seen.add(key)
+            sources.append({"name": name, "url": url})
     return sources
 
 
@@ -144,14 +157,12 @@ class FoundryLocalChat(ChatBackend):
                 "OpenAI-compatible endpoint. Run `pip install openai`."
             ) from e
 
-        # TODO: confirm this against the real foundry-local-sdk API -- see module docstring.
         manager = FoundryLocalManager(self.model_name)
-        self._model_id = manager.get_model_info(self.model_name).id
+        self._model_id = manager.get_model_info(self.model_name, raise_on_not_found=True).id
         self._client = OpenAI(base_url=manager.endpoint, api_key=manager.api_key)
 
     def generate(self, system_prompt: str, user_prompt: str) -> str:
         self._ensure_client()
-        # TODO: confirm Foundry Local's chat-completions call shape for phi-3.5-mini.
         response = self._client.chat.completions.create(
             model=self._model_id,
             messages=[
