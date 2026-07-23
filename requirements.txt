@@ -1,5 +1,8 @@
 # Core
-streamlit>=1.37
+# UI: the delivered design (static/index.html) is a custom HTML/CSS/JS chat app, not a
+# Streamlit-shaped one -- server.py serves it directly and exposes POST /api/ask.
+fastapi>=0.110
+uvicorn[standard]>=0.29
 numpy>=1.26
 pypdf>=4.2          # PDF text extraction for docs/*.pdf
 

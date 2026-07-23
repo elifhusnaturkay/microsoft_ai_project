@@ -1,34 +1,29 @@
 """Prompt assembly + thin call to the chat backend (Phi-3.5 Mini via Foundry Local, with
 an Ollama fallback -- same abstraction pattern as embedder.py).
 
-Citation format: PROJECT_PLAN.md's locked example answers show a footer-style citation
-block, e.g. (Turkish):
+Citation format: the delivered UI design (static/index.html, adapted from the Claude
+Design handoff bundle) renders answers as a list of `segments` -- alternating
+`{"txt": "..."}` plain-text pieces and `{"c": n}` inline citation-chip references -- plus
+a deduped `sources` list of `{"name", "url"}` that the chips and the footer pill-row both
+point into. This is a step up from PROJECT_PLAN.md's original footer-only example (a
+single "**Kaynaklar:**" list at the end): it's the same idea, closer to how Claude's own
+citations render, and the design is the more concrete/current expression of what's wanted.
 
-    ...answer text...
-
-    **Kaynaklar:**
-    - [SHSU Cost of Attendance](https://www.shsu.edu/cost-aid/cost-attendance)
-    - [Cashiering Services - Payments](https://www.shsu.edu/offices-departments/...)
-
-and (English):
-
-    ...answer text...
-
-    **Sources:**
-    - [SHSU Cost of Attendance](https://www.shsu.edu/cost-aid/cost-attendance)
-
-Rather than asking the LLM to reproduce document names/URLs from memory (which risks
-hallucinated links), that footer is assembled programmatically in `answer_query` from the
-*actual* retrieved chunks' source_name/source_url metadata, and appended to whatever the
-model generates. The system prompt asks the model to focus on answering from context and
-not invent a sources list of its own.
+The context block shown to the model numbers *sources*, not retrieved chunks (a chunk may
+carry more than one source -- see rag/chunker.py -- and if the model doesn't cite it, that
+distinct source shouldn't take up a number). The model is instructed to inline-cite using
+those same numbers as `[n]` right after the sentence that uses that source; `parse_segments`
+then splits its raw text on that pattern into the `segments` shape the frontend expects.
+Numbers the model invents that don't correspond to a real source are left as literal text
+rather than crashing or pointing at nothing.
 
 The Foundry Local chat-completion call below is verified against the real
 foundry-local-sdk==0.5.1 source (see rag/embedder.py's module docstring and
 requirements.txt for details on why that exact pre-1.0 version is pinned).
 """
+import re
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from . import config
 
@@ -38,10 +33,18 @@ transfer olan ogrencilere yardimci olan bir asistansin.
 Sadece asagida sana verilen kaynak metinlerdeki (Context) bilgilere dayanarak, Turkce ve \
 net bir sekilde cevap ver. Kaynaklarda olmayan bilgiyi uydurma.
 
-Eger sorunun cevabi verilen kaynaklarda yoksa, acikca "Bu konuda elimde bilgi yok." de.
+Her kaynak metin basinda [1], [2] gibi bir numarayla etiketlenmis. Cevabinda bir kaynaktaki \
+bilgiyi kullandiginda, ilgili cumlenin hemen sonuna o kaynagin numarasini koseli parantez \
+icinde ekle (ornek: "Yillik maliyet yaklasik $41,860 [1]."). Ayni cumlede birden fazla \
+kaynak kullandiysan hepsini ardarda ekle (ornek: "...gerekir [1][2]."). Numarayi yalnizca \
+gercekten o bilgiyi verdiyse kullan.
 
-Cevabinin sonuna kendi kaynak listeni ekleme -- kaynaklar ayrica, kullandigin kaynak \
-metinlere dayanarak otomatik olarak eklenecek. Sadece soruyu cevapla."""
+Eger sorunun cevabi verilen kaynaklarda yoksa, acikca "Bu konuda elimde bilgi yok." de ve \
+hicbir numara ekleme.
+
+Cevabinin sonuna ayrica bir kaynak listesi yazma -- kaynaklar, kullandigin [n] isaretlerine \
+gore otomatik olarak gosterilecek. Sadece soruyu, gerektiginde inline [n] isaretleriyle \
+cevapla."""
 
 SYSTEM_PROMPT_EN = """You are an assistant helping students who are transferring from \
 Firat University to Sam Houston State University (SHSU).
@@ -49,11 +52,18 @@ Firat University to Sam Houston State University (SHSU).
 Answer clearly and only using the information in the source excerpts provided to you \
 below (Context), in English. Do not invent information that isn't in the sources.
 
-If the answer to the question is not present in the given sources, clearly say \
-"I don't have information on that."
+Each source excerpt is labeled with a number like [1], [2]. When you use information from \
+a source, add that source's number in square brackets right after the sentence that uses \
+it (example: "The annual cost is about $41,860 [1]."). If a sentence draws on more than \
+one source, add all of them back to back (example: "...is required [1][2]."). Only use a \
+number when that source actually supports the sentence.
 
-Do not append your own source list at the end of your answer -- the sources will be \
-added automatically based on the context you were given. Just answer the question."""
+If the answer to the question is not present in the given sources, clearly say \
+"I don't have information on that." and don't add any citation numbers.
+
+Do not append your own source list at the end of your answer -- the sources will be shown \
+automatically based on the [n] markers you use. Just answer the question, citing inline \
+with [n] where relevant."""
 
 
 def get_system_prompt(language: str) -> str:
@@ -61,29 +71,10 @@ def get_system_prompt(language: str) -> str:
     return SYSTEM_PROMPT_TR if language == "tr" else SYSTEM_PROMPT_EN
 
 
-def _format_source_label(source: Dict) -> str:
-    name = source.get("name") or "unknown source"
-    return f"{name} ({source['url']})" if source.get("url") else name
-
-
-def format_context_with_sources(chunks: List[Dict]) -> str:
-    """Render retrieved chunks into a numbered context block for the prompt. A chunk may
-    carry more than one source (chunker.py merges small adjacent sections together) --
-    all of them are listed so the model sees exactly what it's allowed to cite."""
-    blocks = []
-    for i, chunk in enumerate(chunks, start=1):
-        sources = chunk.get("sources") or []
-        if sources:
-            label = "; ".join(_format_source_label(src) for src in sources)
-        else:
-            label = chunk.get("source_file") or "unknown source"
-        blocks.append(f"[{i}] {label}\n{chunk.get('content') or chunk.get('text', '')}")
-    return "\n\n".join(blocks)
-
-
-def build_user_prompt(question: str, chunks: List[Dict]) -> str:
-    context = format_context_with_sources(chunks)
-    return f"Context:\n{context}\n\nQuestion: {question}"
+def _chunk_sources(chunk: Dict) -> List[Dict]:
+    """A chunk's sources list, falling back to its source_file if chunker.py didn't
+    attach one (shouldn't normally happen, but keeps this module standalone-safe)."""
+    return chunk.get("sources") or [{"name": chunk.get("source_file") or "unknown source", "url": None}]
 
 
 def _unique_sources(chunks: List[Dict]) -> List[Dict]:
@@ -92,10 +83,7 @@ def _unique_sources(chunks: List[Dict]) -> List[Dict]:
     seen = set()
     sources = []
     for chunk in chunks:
-        chunk_sources = chunk.get("sources") or [
-            {"name": chunk.get("source_file") or "unknown source", "url": None}
-        ]
-        for src in chunk_sources:
+        for src in _chunk_sources(chunk):
             name = src.get("name") or chunk.get("source_file") or "unknown source"
             url = src.get("url")
             key = (name, url)
@@ -106,21 +94,53 @@ def _unique_sources(chunks: List[Dict]) -> List[Dict]:
     return sources
 
 
-def format_citation_footer(chunks: List[Dict], language: str) -> str:
-    """Build the '**Kaynaklar:**' / '**Sources:**' markdown footer from real chunk metadata,
-    replicating the exact format of PROJECT_PLAN.md's example answers."""
+def build_context_and_sources(chunks: List[Dict]) -> Tuple[str, List[Dict]]:
+    """Render retrieved chunks into a context block for the prompt, numbering by distinct
+    *source* (not by chunk) so the numbers the model is asked to cite with `[n]` map 1:1
+    onto the deduped `sources` list the frontend renders as citation chips/pills."""
     sources = _unique_sources(chunks)
-    if not sources:
-        return ""
+    index = {(s["name"], s["url"]): i for i, s in enumerate(sources, start=1)}
 
-    heading = "**Kaynaklar:**" if language == "tr" else "**Sources:**"
-    lines = [heading]
-    for src in sources:
-        if src["url"]:
-            lines.append(f"- [{src['name']}]({src['url']})")
-        else:
-            lines.append(f"- {src['name']}")
-    return "\n".join(lines)
+    blocks = []
+    for chunk in chunks:
+        numbers = sorted(
+            {
+                index[(src.get("name") or chunk.get("source_file") or "unknown source", src.get("url"))]
+                for src in _chunk_sources(chunk)
+            }
+        )
+        label = "".join(f"[{n}]" for n in numbers)
+        blocks.append(f"{label}\n{chunk.get('content') or chunk.get('text', '')}")
+    return "\n\n".join(blocks), sources
+
+
+def build_user_prompt(question: str, chunks: List[Dict]) -> str:
+    context, _ = build_context_and_sources(chunks)
+    return f"Context:\n{context}\n\nQuestion: {question}"
+
+
+_CITATION_RE = re.compile(r"\[(\d+)\]")
+
+
+def parse_segments(raw_answer: str, num_sources: int) -> List[Dict]:
+    """Split the model's raw text into the frontend's alternating segment shape:
+    `{"txt": "..."}` for plain text, `{"c": n}` for an inline citation chip referencing
+    sources[n-1]. A `[n]` outside 1..num_sources isn't a valid citation (the model
+    referenced a source number that doesn't exist) -- left as literal text rather than
+    producing a chip that points nowhere."""
+    segments: List[Dict] = []
+    pos = 0
+    for m in _CITATION_RE.finditer(raw_answer):
+        n = int(m.group(1))
+        if not (1 <= n <= num_sources):
+            continue
+        if m.start() > pos:
+            segments.append({"txt": raw_answer[pos : m.start()]})
+        segments.append({"c": n})
+        pos = m.end()
+    if pos < len(raw_answer):
+        segments.append({"txt": raw_answer[pos:]})
+    return segments
 
 
 class ChatBackend(ABC):
@@ -220,14 +240,14 @@ def answer_query(
     backend: Optional[ChatBackend] = None,
 ) -> Dict:
     """Assemble the prompt from retrieved chunks + question, call the chat backend, and
-    return {"answer": <markdown text with citation footer>, "sources": [{"name", "url"}]}.
-    """
+    return {"segments": [...], "sources": [...]} -- the shape static/index.html's chat UI
+    renders directly (inline [n] citation chips + a deduped source pill list)."""
     backend = backend or get_chat_backend()
     system_prompt = get_system_prompt(language)
-    user_prompt = build_user_prompt(question, chunks)
+    context, sources = build_context_and_sources(chunks)
+    user_prompt = f"Context:\n{context}\n\nQuestion: {question}"
 
-    model_answer = backend.generate(system_prompt, user_prompt)
-    footer = format_citation_footer(chunks, language)
-    full_answer = f"{model_answer}\n\n{footer}" if footer else model_answer
+    raw_answer = backend.generate(system_prompt, user_prompt)
+    segments = parse_segments(raw_answer, num_sources=len(sources))
 
-    return {"answer": full_answer, "sources": _unique_sources(chunks)}
+    return {"segments": segments, "sources": sources}

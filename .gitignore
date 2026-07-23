@@ -10,7 +10,7 @@ __pycache__/
 venv/
 
 # Generated at runtime (rebuilt via scripts/ingest.py)
-knowledge.db
+*.db
 
 # OS
 .DS_Store
@@ -18,3 +18,9 @@ knowledge.db
 # Kept out of the public repo by request
 Summer School Foundry Local Plan.pdf
 videoframe_579.png
+
+# Claude Design handoff bundle (source for static/) -- its own uploads/ context dump
+# includes a copy of subagents/ and other project files pulled in for design reference;
+# keep the whole bundle out of git rather than the pushed public repo.
+shsu-transfer-sohbet-aray-z/
+*.zip
