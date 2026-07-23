@@ -67,6 +67,7 @@ def ask(request: AskRequest):
     embedder = _get_embedder()
     conn = _get_db_connection()
     chunks = get_top_chunks(retrieval_query, embedder, conn, k=config.TOP_K)
+    chunks = [c for c in chunks if c["similarity"] >= config.MIN_SIMILARITY]
     if not chunks:
         return {"segments": [], "sources": []}
 
