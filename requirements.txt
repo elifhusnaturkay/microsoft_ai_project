@@ -1,0 +1,22 @@
+# Core
+streamlit>=1.37
+numpy>=1.26
+pypdf>=4.2          # PDF text extraction for docs/*.pdf
+
+# Local inference backends
+# TODO: verify the exact pip package name for Microsoft Foundry Local's Python SDK before
+# running `pip install -r requirements.txt` for real. PROJECT_PLAN.md's own setup notes
+# (see "Adim 1: Ortam Kurulumu") reference `pip install foundry-local-sdk` and
+# `from foundry_local import FoundryLocalManager`, which is what's pinned below, but this
+# has not been independently confirmed against PyPI in this pass -- double check the
+# package exists and this is the current name before relying on it.
+foundry-local-sdk
+openai>=1.30        # Foundry Local exposes an OpenAI-compatible local endpoint (see rag/embedder.py, rag/generator.py TODOs)
+
+# Ollama fallback (see PROJECT_PLAN.md "Yedek Plan"). The `ollama` package is optional --
+# rag/embedder.py and rag/generator.py talk to the local Ollama HTTP API directly via `requests`,
+# so only `requests` is strictly required for the fallback path.
+requests>=2.31
+
+# Dev / tests
+pytest>=8.0

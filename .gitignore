@@ -1,0 +1,20 @@
+# Claude Code / agent tooling -- not part of the public project
+.claude/
+subagents/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Generated at runtime (rebuilt via scripts/ingest.py)
+knowledge.db
+
+# OS
+.DS_Store
+
+# Kept out of the public repo by request
+Summer School Foundry Local Plan.pdf
+videoframe_579.png
