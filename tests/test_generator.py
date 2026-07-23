@@ -83,7 +83,7 @@ def test_answer_query_returns_segments_and_sources_shape():
     ]
 
     class FakeBackend:
-        def generate(self, system_prompt, user_prompt):
+        def generate(self, system_prompt, user_prompt, max_tokens=None):
             assert "[1]" in user_prompt
             return "Tuition is $41,860 [1]."
 
@@ -95,7 +95,7 @@ def test_answer_query_returns_segments_and_sources_shape():
 
 def test_translate_query_for_retrieval_returns_backend_output():
     class FakeBackend:
-        def generate(self, system_prompt, user_prompt):
+        def generate(self, system_prompt, user_prompt, max_tokens=None):
             assert user_prompt == "yillik maliyet ne kadar?"
             assert "English" in system_prompt
             return "What is the annual cost?"
@@ -106,7 +106,7 @@ def test_translate_query_for_retrieval_returns_backend_output():
 
 def test_translate_query_for_retrieval_falls_back_to_original_on_empty_response():
     class EmptyBackend:
-        def generate(self, system_prompt, user_prompt):
+        def generate(self, system_prompt, user_prompt, max_tokens=None):
             return "   "
 
     result = translate_query_for_retrieval("some question", EmptyBackend())

@@ -33,11 +33,19 @@ transfer olan ogrencilere yardimci olan bir asistansin.
 Sadece asagida sana verilen kaynak metinlerdeki (Context) bilgilere dayanarak, Turkce ve \
 net bir sekilde cevap ver. Kaynaklarda olmayan bilgiyi uydurma.
 
+KISA cevap ver: en fazla 2-3 cumle. Gereksiz tekrar veya uzun aciklama ekleme, dogrudan \
+soruyu yanitla.
+
 Her kaynak metin basinda [1], [2] gibi bir numarayla etiketlenmis. Cevabinda bir kaynaktaki \
 bilgiyi kullandiginda, ilgili cumlenin hemen sonuna o kaynagin numarasini koseli parantez \
 icinde ekle (ornek: "Yillik maliyet yaklasik $41,860 [1]."). Ayni cumlede birden fazla \
 kaynak kullandiysan hepsini ardarda ekle (ornek: "...gerekir [1][2]."). Numarayi yalnizca \
 gercekten o bilgiyi verdiyse kullan.
+
+Ogrenciyi bir eyleme yonlendiriyorsan (randevu almasi, bir siteye gitmesi, bir formu \
+doldurmasi, bir ofise basvurmasi gerekiyorsa), o eylemin kaynagini MUTLAKA [n] ile isaretle \
+-- ogrenci boylece dogrudan ilgili linke tiklayabilir. Yonlendirme yaparken sadece "ilgili \
+ofise basvur" gibi belirsiz birakma; hangi kaynaktan oldugunu [n] ile belirt.
 
 Eger sorunun cevabi verilen kaynaklarda yoksa, acikca "Bu konuda elimde bilgi yok." de ve \
 hicbir numara ekleme.
@@ -52,11 +60,19 @@ Firat University to Sam Houston State University (SHSU).
 Answer clearly and only using the information in the source excerpts provided to you \
 below (Context), in English. Do not invent information that isn't in the sources.
 
+Keep it SHORT: 2-3 sentences at most. Don't repeat yourself or over-explain -- answer the \
+question directly.
+
 Each source excerpt is labeled with a number like [1], [2]. When you use information from \
 a source, add that source's number in square brackets right after the sentence that uses \
 it (example: "The annual cost is about $41,860 [1]."). If a sentence draws on more than \
 one source, add all of them back to back (example: "...is required [1][2]."). Only use a \
 number when that source actually supports the sentence.
+
+If you're directing the student to take an action (book an appointment, visit a site, fill \
+out a form, contact an office), ALWAYS cite that action's source with [n] so they get a \
+clickable link straight to it. Don't leave a directive vague like "contact the relevant \
+office" without a [n] pointing to which one.
 
 If the answer to the question is not present in the given sources, clearly say \
 "I don't have information on that." and don't add any citation numbers.
@@ -145,8 +161,10 @@ def parse_segments(raw_answer: str, num_sources: int) -> List[Dict]:
 
 class ChatBackend(ABC):
     @abstractmethod
-    def generate(self, system_prompt: str, user_prompt: str) -> str:
-        """Return the model's raw answer text for the given system+user prompt."""
+    def generate(self, system_prompt: str, user_prompt: str, max_tokens: Optional[int] = None) -> str:
+        """Return the model's raw answer text for the given system+user prompt.
+        `max_tokens` bounds output length -- a real speed lever for local inference
+        (generation time scales with output token count), not just a quality knob."""
         raise NotImplementedError
 
 
@@ -181,14 +199,16 @@ class FoundryLocalChat(ChatBackend):
         self._model_id = manager.get_model_info(self.model_name, raise_on_not_found=True).id
         self._client = OpenAI(base_url=manager.endpoint, api_key=manager.api_key)
 
-    def generate(self, system_prompt: str, user_prompt: str) -> str:
+    def generate(self, system_prompt: str, user_prompt: str, max_tokens: Optional[int] = None) -> str:
         self._ensure_client()
+        kwargs = {"max_tokens": max_tokens} if max_tokens is not None else {}
         response = self._client.chat.completions.create(
             model=self._model_id,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            **kwargs,
         )
         return response.choices[0].message.content
 
@@ -200,21 +220,21 @@ class OllamaChat(ChatBackend):
         self.model_name = model_name or config.OLLAMA_CHAT_MODEL
         self.host = host or config.OLLAMA_HOST
 
-    def generate(self, system_prompt: str, user_prompt: str) -> str:
+    def generate(self, system_prompt: str, user_prompt: str, max_tokens: Optional[int] = None) -> str:
         import requests
 
-        resp = requests.post(
-            f"{self.host}/api/chat",
-            json={
-                "model": self.model_name,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "stream": False,
-            },
-            timeout=120,
-        )
+        body = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "stream": False,
+        }
+        if max_tokens is not None:
+            body["options"] = {"num_predict": max_tokens}
+
+        resp = requests.post(f"{self.host}/api/chat", json=body, timeout=120)
         resp.raise_for_status()
         return resp.json()["message"]["content"]
 
@@ -254,7 +274,9 @@ def translate_query_for_retrieval(question: str, backend: ChatBackend) -> str:
     turns out to need it too. The ORIGINAL question (not this translation) is still what
     gets passed to answer_query, so the model answers in the user's own language/phrasing.
     """
-    translated = backend.generate(_TRANSLATE_SYSTEM_PROMPT, question).strip()
+    translated = backend.generate(
+        _TRANSLATE_SYSTEM_PROMPT, question, max_tokens=config.MAX_TRANSLATE_TOKENS
+    ).strip()
     return translated or question
 
 
@@ -272,7 +294,7 @@ def answer_query(
     context, sources = build_context_and_sources(chunks)
     user_prompt = f"Context:\n{context}\n\nQuestion: {question}"
 
-    raw_answer = backend.generate(system_prompt, user_prompt)
+    raw_answer = backend.generate(system_prompt, user_prompt, max_tokens=config.MAX_ANSWER_TOKENS)
     segments = parse_segments(raw_answer, num_sources=len(sources))
 
     return {"segments": segments, "sources": sources}

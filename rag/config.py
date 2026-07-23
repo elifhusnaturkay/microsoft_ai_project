@@ -14,6 +14,13 @@ DB_PATH = os.environ.get("RAG_DB_PATH", str(PROJECT_ROOT / "knowledge.db"))
 # Retrieval
 TOP_K = int(os.environ.get("RAG_TOP_K", "3"))
 
+# Generation length caps (speed lever: local-model latency scales with output token count).
+# Measured on an M2/16GB via Ollama: an uncapped, verbose answer took ~50s; the query
+# translation step only ever needs a short phrase, not a paragraph, so it gets a much
+# tighter cap. Both overridable per-deployment/hardware.
+MAX_ANSWER_TOKENS = int(os.environ.get("RAG_MAX_ANSWER_TOKENS", "300"))
+MAX_TRANSLATE_TOKENS = int(os.environ.get("RAG_MAX_TRANSLATE_TOKENS", "60"))
+
 # Chunking (paragraph-based, ~200-500 words per PROJECT_PLAN.md)
 MIN_CHUNK_WORDS = int(os.environ.get("RAG_MIN_CHUNK_WORDS", "200"))
 MAX_CHUNK_WORDS = int(os.environ.get("RAG_MAX_CHUNK_WORDS", "500"))
