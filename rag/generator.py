@@ -207,6 +207,14 @@ class FoundryLocalChat(ChatBackend):
 
     def generate(self, system_prompt: str, user_prompt: str, max_tokens: Optional[int] = None) -> str:
         self._ensure_client()
+        # Qwen3 is a hybrid-thinking model that defaults to emitting raw chain-of-thought
+        # text instead of a final answer (same failure mode as GeminiChat's thinking bug --
+        # with short max_tokens caps, the answer gets cut off mid-reasoning). Qwen3's chat
+        # template recognizes a literal "/no_think" directive in the prompt to switch it
+        # into direct-answer mode. Other models (phi-3.5-mini, etc.) just ignore the
+        # literal text, so this is safe to send unconditionally to any qwen3 alias.
+        if self.model_name.lower().startswith("qwen3"):
+            system_prompt = f"{system_prompt} /no_think"
         kwargs = {"max_tokens": max_tokens} if max_tokens is not None else {}
         response = self._client.chat.completions.create(
             model=self._model_id,
