@@ -1,8 +1,12 @@
-"""Unit tests for server.py's /api/ask handler: the MIN_SIMILARITY relevance filter."""
+"""Unit tests for server.py's /api/ask handler: the MIN_SIMILARITY relevance filter and
+the backend-unavailable -> 503 error path."""
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import pytest
+from fastapi import HTTPException
 
 import server
 from rag import config
@@ -74,3 +78,30 @@ def test_ask_returns_empty_when_all_chunks_below_threshold(monkeypatch):
     result = server.ask(server.AskRequest(question="meow?", language="tr"))
 
     assert result == {"segments": [], "sources": []}
+
+
+def test_ask_returns_503_when_the_chat_backend_is_unreachable(monkeypatch):
+    def raise_connection_error():
+        raise ConnectionError("Ollama not running")
+
+    monkeypatch.setattr(server, "get_chat_backend", raise_connection_error)
+
+    with pytest.raises(HTTPException) as exc_info:
+        server.ask(server.AskRequest(question="how much is tuition?", language="en"))
+
+    assert exc_info.value.status_code == 503
+
+
+def test_ask_returns_503_when_retrieval_fails(monkeypatch):
+    def raise_connection_error(*a, **k):
+        raise ConnectionError("embedding backend not running")
+
+    monkeypatch.setattr(server, "get_chat_backend", lambda: FakeBackend())
+    monkeypatch.setattr(server, "_get_embedder", lambda: object())
+    monkeypatch.setattr(server, "_get_db_connection", lambda: object())
+    monkeypatch.setattr(server, "get_top_chunks", raise_connection_error)
+
+    with pytest.raises(HTTPException) as exc_info:
+        server.ask(server.AskRequest(question="how much is tuition?", language="en"))
+
+    assert exc_info.value.status_code == 503
