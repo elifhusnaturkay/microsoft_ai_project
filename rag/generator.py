@@ -47,8 +47,13 @@ doldurmasi, bir ofise basvurmasi gerekiyorsa), o eylemin kaynagini MUTLAKA [n] i
 -- ogrenci boylece dogrudan ilgili linke tiklayabilir. Yonlendirme yaparken sadece "ilgili \
 ofise basvur" gibi belirsiz birakma; hangi kaynaktan oldugunu [n] ile belirt.
 
-Eger sorunun cevabi verilen kaynaklarda yoksa, acikca "Bu konuda elimde bilgi yok." de ve \
-hicbir numara ekleme.
+Eger soru bir bilgi talebi degil de "naber", "merhaba", "selam" gibi bir selamlasma/sohbet \
+acilisiysa, kaynaklari yok sayip sicak ve kisa bir selamla karsilik ver, ardindan transfer \
+sureciyle ilgili nasil yardimci olabilecegini sor. Bu durumda "bilgim yok" deme ve hicbir \
+numara ekleme -- ortada cevaplanacak bir soru yok, sadece bir selamlasma var.
+
+Eger soru gercek bir bilgi talebiyse ama cevabi verilen kaynaklarda yoksa, acikca "Bu \
+konuda elimde bilgi yok." de ve hicbir numara ekleme.
 
 Cevabinin sonuna ayrica bir kaynak listesi yazma -- kaynaklar, kullandigin [n] isaretlerine \
 gore otomatik olarak gosterilecek. Sadece soruyu, gerektiginde inline [n] isaretleriyle \
@@ -74,8 +79,13 @@ out a form, contact an office), ALWAYS cite that action's source with [n] so the
 clickable link straight to it. Don't leave a directive vague like "contact the relevant \
 office" without a [n] pointing to which one.
 
-If the answer to the question is not present in the given sources, clearly say \
-"I don't have information on that." and don't add any citation numbers.
+If the message is a greeting or small talk ("hey", "hi", "what's up") rather than an actual \
+question, ignore the sources and reply with a short, warm greeting, then ask how you can \
+help with their transfer process. Don't say "I don't have information on that" for a \
+greeting and don't add any citation numbers -- there's no question to answer yet.
+
+If the message is a real question but its answer is not present in the given sources, \
+clearly say "I don't have information on that." and don't add any citation numbers.
 
 Do not append your own source list at the end of your answer -- the sources will be shown \
 automatically based on the [n] markers you use. Just answer the question, citing inline \
@@ -368,4 +378,14 @@ def answer_query(
     raw_answer = backend.generate(system_prompt, user_prompt, max_tokens=config.MAX_ANSWER_TOKENS)
     segments = parse_segments(raw_answer, num_sources=len(sources))
 
-    return {"segments": segments, "sources": sources}
+    # `sources` above is every retrieved chunk's source, not just the ones the model
+    # actually cited (e.g. it retrieved chunks but answered "I don't have information on
+    # that," or this is a greeting with no citations at all) -- showing all of them next to
+    # an uncited answer reads as a bug (a pile of "sources" for a non-answer). Keep only
+    # the cited ones, renumbered so the chip numbers stay sequential and gap-free.
+    cited_numbers = sorted({seg["c"] for seg in segments if "c" in seg})
+    cited_sources = [sources[n - 1] for n in cited_numbers]
+    renumber = {old_n: new_n for new_n, old_n in enumerate(cited_numbers, start=1)}
+    segments = [{"c": renumber[seg["c"]]} if "c" in seg else seg for seg in segments]
+
+    return {"segments": segments, "sources": cited_sources}

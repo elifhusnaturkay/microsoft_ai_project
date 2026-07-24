@@ -104,6 +104,43 @@ def test_answer_query_returns_segments_and_sources_shape():
     assert result["segments"] == [{"txt": "Tuition is $41,860 "}, {"c": 1}, {"txt": "."}]
 
 
+def test_answer_query_drops_uncited_sources_and_renumbers_the_rest():
+    # Retrieval can pass back chunks the model never actually uses -- e.g. it answers
+    # "I don't have information on that," or the message is a greeting with no citations
+    # at all. `sources` must reflect what was actually cited, not everything retrieved
+    # (showing a pile of unrelated sources under a non-answer reads as a bug).
+    chunks = [
+        {"text": "Irrelevant chunk.", "source_file": "a.md", "sources": [{"name": "A", "url": "https://x/a"}]},
+        {"text": "Tuition is $41,860.", "source_file": "b.md", "sources": [{"name": "B", "url": "https://x/b"}]},
+        {"text": "Also irrelevant.", "source_file": "c.md", "sources": [{"name": "C", "url": "https://x/c"}]},
+    ]
+
+    class FakeBackend:
+        def generate(self, system_prompt, user_prompt, max_tokens=None):
+            return "Tuition is $41,860 [2]."  # only cites the 2nd of 3 retrieved sources
+
+    result = answer_query("How much is tuition?", chunks, language="en", backend=FakeBackend())
+
+    assert result["sources"] == [{"name": "B", "url": "https://x/b"}]
+    assert result["segments"] == [{"txt": "Tuition is $41,860 "}, {"c": 1}, {"txt": "."}]
+
+
+def test_answer_query_returns_no_sources_when_answer_has_no_citations():
+    # e.g. a greeting, or "I don't have information on that" -- both are uncited by design.
+    chunks = [
+        {"text": "Tuition is $41,860.", "source_file": "a.md", "sources": [{"name": "A", "url": "https://x/a"}]},
+    ]
+
+    class FakeBackend:
+        def generate(self, system_prompt, user_prompt, max_tokens=None):
+            return "Hey! How can I help with your transfer to SHSU?"
+
+    result = answer_query("hey", chunks, language="en", backend=FakeBackend())
+
+    assert result["sources"] == []
+    assert result["segments"] == [{"txt": "Hey! How can I help with your transfer to SHSU?"}]
+
+
 def test_translate_query_for_retrieval_returns_backend_output():
     class FakeBackend:
         def generate(self, system_prompt, user_prompt, max_tokens=None):
