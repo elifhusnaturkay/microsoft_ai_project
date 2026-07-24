@@ -10,6 +10,7 @@ from fastapi import HTTPException
 
 import server
 from rag import config
+from rag.generator import ContentBlocked
 
 
 class FakeBackend:
@@ -90,6 +91,25 @@ def test_ask_returns_503_when_the_chat_backend_is_unreachable(monkeypatch):
         server.ask(server.AskRequest(question="how much is tuition?", language="en"))
 
     assert exc_info.value.status_code == 503
+
+
+def test_ask_returns_refusal_text_when_backend_blocks_content(monkeypatch):
+    # A backend's own safety layer refusing a request is a deliberate response, not an
+    # outage -- this should surface as 200 + REFUSAL_TEXT, not the generic 503 path.
+    chunks = [{"text": "Relevant.", "source_file": "a.md", "similarity": config.MIN_SIMILARITY,
+               "sources": [{"name": "A", "url": "https://x/a"}]}]
+    _patch_pipeline(monkeypatch, chunks)
+
+    def raise_blocked(question, kept_chunks, language, backend):
+        raise ContentBlocked("Gemini declined to respond (finish_reason=SAFETY)")
+
+    monkeypatch.setattr(server, "answer_query", raise_blocked)
+
+    result_tr = server.ask(server.AskRequest(question="kotu bir sey soyle", language="tr"))
+    assert result_tr == {"segments": [{"txt": server.REFUSAL_TEXT["tr"]}], "sources": []}
+
+    result_en = server.ask(server.AskRequest(question="say something bad", language="en"))
+    assert result_en == {"segments": [{"txt": server.REFUSAL_TEXT["en"]}], "sources": []}
 
 
 def test_ask_returns_503_when_retrieval_fails(monkeypatch):

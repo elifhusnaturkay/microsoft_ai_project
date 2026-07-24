@@ -159,6 +159,12 @@ def parse_segments(raw_answer: str, num_sources: int) -> List[Dict]:
     return segments
 
 
+class ContentBlocked(Exception):
+    """Raised by a ChatBackend.generate() when the backend's own safety system
+    refused to produce a response -- distinct from a backend outage/bug, so callers
+    can show a deliberate "I won't do that" message instead of a generic error."""
+
+
 class ChatBackend(ABC):
     @abstractmethod
     def generate(self, system_prompt: str, user_prompt: str, max_tokens: Optional[int] = None) -> str:
@@ -283,6 +289,14 @@ class GeminiChat(ChatBackend):
             contents=user_prompt,
             config=types.GenerateContentConfig(**config_kwargs),
         )
+        # response.text is None whenever Gemini's own safety layer declined to answer
+        # (finish_reason SAFETY/PROHIBITED_CONTENT/etc, empty content.parts) -- with
+        # thinking disabled above, a normal answer always has text, so None here means
+        # "refused," not "empty." Surface that distinctly instead of returning None
+        # (which would blow up downstream in parse_segments expecting a string).
+        if response.text is None:
+            finish_reason = response.candidates[0].finish_reason if response.candidates else None
+            raise ContentBlocked(f"Gemini declined to respond (finish_reason={finish_reason})")
         return response.text
 
 

@@ -18,12 +18,19 @@ from pydantic import BaseModel
 
 from rag import config, store
 from rag.embedder import get_embedder
-from rag.generator import answer_query, get_chat_backend, translate_query_for_retrieval
+from rag.generator import ContentBlocked, answer_query, get_chat_backend, translate_query_for_retrieval
 from rag.retriever import get_top_chunks
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 logger = logging.getLogger(__name__)
+
+# Shown when a backend's own safety layer refuses a request (see rag/generator.py's
+# ContentBlocked) -- a deliberate response, not the generic "backend unavailable" error.
+REFUSAL_TEXT = {
+    "tr": "Buna hiç yakıştıramadım.",
+    "en": "I really can't see myself doing that.",
+}
 
 app = FastAPI(title="SHSU Transfer Assistant")
 
@@ -76,6 +83,8 @@ def ask(request: AskRequest):
             return {"segments": [], "sources": []}
 
         return answer_query(question, chunks, language=language, backend=chat_backend)
+    except ContentBlocked:
+        return {"segments": [{"txt": REFUSAL_TEXT[language]}], "sources": []}
     except Exception:
         # Any failure here means the local model backend (Foundry Local / Ollama) didn't
         # respond -- not a bug in this app's own logic. Surface a distinct status so the
