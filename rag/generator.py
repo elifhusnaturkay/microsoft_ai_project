@@ -265,7 +265,16 @@ class GeminiChat(ChatBackend):
         self._ensure_client()
         from google.genai import types
 
-        config_kwargs = {"system_instruction": system_prompt}
+        # Gemini 2.5 Flash thinks by default, and thinking tokens count against
+        # max_output_tokens -- with the short caps this project uses (see config.py's
+        # MAX_ANSWER_TOKENS/MAX_TRANSLATE_TOKENS), that silently starves the visible
+        # answer (finish_reason=MAX_TOKENS, response.text=None) before it's written.
+        # This is a short-citation-answer bot, not a reasoning task, so thinking is
+        # disabled outright rather than budgeted around.
+        config_kwargs = {
+            "system_instruction": system_prompt,
+            "thinking_config": types.ThinkingConfig(thinking_budget=0),
+        }
         if max_tokens is not None:
             config_kwargs["max_output_tokens"] = max_tokens
 

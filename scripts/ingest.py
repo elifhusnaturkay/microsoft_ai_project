@@ -23,7 +23,7 @@ def main() -> None:
     parser.add_argument(
         "--backend",
         default=config.EMBED_BACKEND,
-        choices=["foundry", "ollama"],
+        choices=["foundry", "ollama", "gemini"],
         help="Embedding backend to use (default from RAG_EMBED_BACKEND / config.py).",
     )
     parser.add_argument(
@@ -44,7 +44,12 @@ def main() -> None:
     chunks = chunker.chunk_documents(documents)
     print(f"      produced {len(chunks)} chunk(s)")
 
-    print(f"[3/4] Embedding with backend={args.backend!r} (model={config.LOCAL_EMBED_MODEL if args.backend == 'foundry' else config.OLLAMA_EMBED_MODEL}) ...")
+    _embed_model_by_backend = {
+        "foundry": config.LOCAL_EMBED_MODEL,
+        "ollama": config.OLLAMA_EMBED_MODEL,
+        "gemini": config.GEMINI_EMBED_MODEL,
+    }
+    print(f"[3/4] Embedding with backend={args.backend!r} (model={_embed_model_by_backend[args.backend]}) ...")
     embedder = get_embedder(args.backend)
     texts = [c["text"] for c in chunks]
     vectors = embedder.embed(texts)
