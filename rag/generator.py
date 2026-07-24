@@ -239,18 +239,58 @@ class OllamaChat(ChatBackend):
         return resp.json()["message"]["content"]
 
 
+class GeminiChat(ChatBackend):
+    """Gemini 2.5 Flash via the Gemini API -- optional cloud-deploy path (RAG_CHAT_BACKEND=gemini),
+    not the offline default. `genai.Client()` reads GEMINI_API_KEY from the environment itself."""
+
+    def __init__(self, model_name: str = None):
+        self.model_name = model_name or config.GEMINI_CHAT_MODEL
+        self._client = None
+
+    def _ensure_client(self):
+        if self._client is not None:
+            return
+
+        try:
+            from google import genai
+        except ImportError as e:
+            raise RuntimeError(
+                "google-genai is not installed. Run `pip install google-genai` "
+                "(see requirements.txt), or set RAG_CHAT_BACKEND=foundry/ollama instead."
+            ) from e
+
+        self._client = genai.Client()
+
+    def generate(self, system_prompt: str, user_prompt: str, max_tokens: Optional[int] = None) -> str:
+        self._ensure_client()
+        from google.genai import types
+
+        config_kwargs = {"system_instruction": system_prompt}
+        if max_tokens is not None:
+            config_kwargs["max_output_tokens"] = max_tokens
+
+        response = self._client.models.generate_content(
+            model=self.model_name,
+            contents=user_prompt,
+            config=types.GenerateContentConfig(**config_kwargs),
+        )
+        return response.text
+
+
 def get_chat_backend(backend: str = None) -> ChatBackend:
     """Factory: returns the configured ChatBackend implementation.
 
-    `backend` defaults to config.CHAT_BACKEND ("foundry" or "ollama"), overridable via the
-    RAG_CHAT_BACKEND env var or by passing it explicitly.
+    `backend` defaults to config.CHAT_BACKEND ("foundry", "ollama", or "gemini"), overridable
+    via the RAG_CHAT_BACKEND env var or by passing it explicitly.
     """
     backend = (backend or config.CHAT_BACKEND).lower()
     if backend == "foundry":
         return FoundryLocalChat()
     if backend == "ollama":
         return OllamaChat()
-    raise ValueError(f"Unknown chat backend: {backend!r} (expected 'foundry' or 'ollama')")
+    if backend == "gemini":
+        return GeminiChat()
+    raise ValueError(f"Unknown chat backend: {backend!r} (expected 'foundry', 'ollama', or 'gemini')")
 
 
 _TRANSLATE_SYSTEM_PROMPT = (

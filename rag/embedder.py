@@ -106,15 +106,55 @@ class OllamaEmbedder(Embedder):
         return np.array(vectors, dtype=np.float32)
 
 
+class GeminiEmbedder(Embedder):
+    """gemini-embedding-001 via the Gemini API -- optional cloud-deploy path
+    (RAG_EMBED_BACKEND=gemini), not the offline default. `genai.Client()` reads
+    GEMINI_API_KEY from the environment itself.
+
+    Embeds one text per call, like OllamaEmbedder above -- some gemini-embedding model
+    versions aggregate a batch `contents` list into a single vector instead of returning
+    one per input, which would silently corrupt the vector store.
+    """
+
+    def __init__(self, model_name: str = None):
+        self.model_name = model_name or config.GEMINI_EMBED_MODEL
+        self._client = None
+
+    def _ensure_client(self):
+        if self._client is not None:
+            return
+
+        try:
+            from google import genai
+        except ImportError as e:
+            raise RuntimeError(
+                "google-genai is not installed. Run `pip install google-genai` "
+                "(see requirements.txt), or set RAG_EMBED_BACKEND=foundry/ollama instead."
+            ) from e
+
+        self._client = genai.Client()
+
+    def embed(self, texts: Sequence[str]) -> np.ndarray:
+        self._ensure_client()
+
+        vectors: List[List[float]] = []
+        for text in texts:
+            result = self._client.models.embed_content(model=self.model_name, contents=text)
+            vectors.append(result.embeddings[0].values)
+        return np.array(vectors, dtype=np.float32)
+
+
 def get_embedder(backend: str = None) -> Embedder:
     """Factory: returns the configured Embedder implementation.
 
-    `backend` defaults to config.EMBED_BACKEND ("foundry" or "ollama"), overridable via the
-    RAG_EMBED_BACKEND env var or by passing it explicitly (e.g. from a CLI flag).
+    `backend` defaults to config.EMBED_BACKEND ("foundry", "ollama", or "gemini"), overridable
+    via the RAG_EMBED_BACKEND env var or by passing it explicitly (e.g. from a CLI flag).
     """
     backend = (backend or config.EMBED_BACKEND).lower()
     if backend == "foundry":
         return FoundryLocalEmbedder()
     if backend == "ollama":
         return OllamaEmbedder()
-    raise ValueError(f"Unknown embed backend: {backend!r} (expected 'foundry' or 'ollama')")
+    if backend == "gemini":
+        return GeminiEmbedder()
+    raise ValueError(f"Unknown embed backend: {backend!r} (expected 'foundry', 'ollama', or 'gemini')")

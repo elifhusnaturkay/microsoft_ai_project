@@ -24,5 +24,10 @@ openai>=1.30        # Foundry Local exposes an OpenAI-compatible local endpoint 
 # so only `requests` is strictly required for the fallback path.
 requests>=2.31
 
+# Gemini cloud backend (optional -- only needed for RAG_CHAT_BACKEND=gemini /
+# RAG_EMBED_BACKEND=gemini, the opt-in "share as a web link" deploy mode; the offline
+# default remains Foundry Local/Ollama above).
+google-genai>=1.0
+
 # Dev / tests
 pytest>=8.0

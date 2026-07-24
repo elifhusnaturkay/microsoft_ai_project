@@ -2,9 +2,20 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from rag.generator import answer_query, build_context_and_sources, parse_segments, translate_query_for_retrieval
+from rag.generator import (
+    FoundryLocalChat,
+    GeminiChat,
+    OllamaChat,
+    answer_query,
+    build_context_and_sources,
+    get_chat_backend,
+    parse_segments,
+    translate_query_for_retrieval,
+)
 
 
 def test_build_context_and_sources_numbers_by_distinct_source_not_chunk():
@@ -111,3 +122,20 @@ def test_translate_query_for_retrieval_falls_back_to_original_on_empty_response(
 
     result = translate_query_for_retrieval("some question", EmptyBackend())
     assert result == "some question"
+
+
+def test_get_chat_backend_foundry():
+    assert isinstance(get_chat_backend("foundry"), FoundryLocalChat)
+
+
+def test_get_chat_backend_ollama():
+    assert isinstance(get_chat_backend("ollama"), OllamaChat)
+
+
+def test_get_chat_backend_gemini():
+    assert isinstance(get_chat_backend("gemini"), GeminiChat)
+
+
+def test_get_chat_backend_unknown_raises_with_all_three_names():
+    with pytest.raises(ValueError, match="foundry.*ollama.*gemini"):
+        get_chat_backend("nonexistent")
