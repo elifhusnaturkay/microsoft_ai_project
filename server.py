@@ -85,13 +85,14 @@ def ask(request: AskRequest):
         return answer_query(question, chunks, language=language, backend=chat_backend)
     except ContentBlocked:
         return {"segments": [{"txt": REFUSAL_TEXT[language]}], "sources": []}
-    except Exception:
-        # Any failure here means the local model backend (Foundry Local / Ollama) didn't
+    except Exception as e:
+        # Any failure here means the configured chat/embedding backend (local Foundry
+        # Local/Ollama, or the Gemini backend used on the public Render deployment) didn't
         # respond -- not a bug in this app's own logic. Surface a distinct status so the
-        # frontend's existing "couldn't reach the local model" message (static/index.html's
-        # fetchAnswer) is accurate, and log the real cause for whoever's running the demo.
-        logger.exception("Local model backend failed while answering a question")
-        raise HTTPException(status_code=503, detail="Local model backend unavailable")
+        # frontend's existing "couldn't reach the chat backend" message (static/index.html's
+        # fetchAnswer) is accurate, and log the real cause for whoever's diagnosing it.
+        logger.exception("Chat backend failed while answering a question: %s: %s", type(e).__name__, e)
+        raise HTTPException(status_code=503, detail="Chat backend unavailable")
 
 
 # Registered last: an explicit route above (like /api/ask) always wins over this

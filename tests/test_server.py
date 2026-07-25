@@ -81,16 +81,28 @@ def test_ask_returns_empty_when_all_chunks_below_threshold(monkeypatch):
     assert result == {"segments": [], "sources": []}
 
 
-def test_ask_returns_503_when_the_chat_backend_is_unreachable(monkeypatch):
+def test_ask_returns_503_when_the_chat_backend_is_unreachable(monkeypatch, caplog):
     def raise_connection_error():
-        raise ConnectionError("Ollama not running")
+        raise ConnectionError("Gemini API key missing or invalid")
 
     monkeypatch.setattr(server, "get_chat_backend", raise_connection_error)
 
-    with pytest.raises(HTTPException) as exc_info:
-        server.ask(server.AskRequest(question="how much is tuition?", language="en"))
+    with caplog.at_level("ERROR"):
+        with pytest.raises(HTTPException) as exc_info:
+            server.ask(server.AskRequest(question="how much is tuition?", language="en"))
 
     assert exc_info.value.status_code == 503
+    # The detail must not name a specific backend -- the public deployment runs Gemini,
+    # not the offline Foundry Local/Ollama backend the old hardcoded string assumed,
+    # and that mismatch previously misdirected diagnosis of prod failures.
+    assert exc_info.value.detail == "Chat backend unavailable"
+    # The log line itself (not just the attached traceback) must carry the real
+    # exception type/message so failures are diagnosable without a full stack trace.
+    log_message = caplog.records[-1].getMessage()
+    assert "ConnectionError" in log_message
+    assert "Gemini API key missing or invalid" in log_message
+    assert "foundry" not in log_message.lower()
+    assert "ollama" not in log_message.lower()
 
 
 def test_ask_returns_refusal_text_when_backend_blocks_content(monkeypatch):
