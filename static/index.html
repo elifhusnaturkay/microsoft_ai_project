@@ -32,6 +32,25 @@
       .shsu-side.open { transform: translateX(0); box-shadow: 0 0 50px rgba(40,40,30,.25); }
       .shsu-backdrop { display: block; }
     }
+    /* Header (hamburger + title + status badge + TR/EN toggle) has no room to spare once
+       the viewport drops below ~420px -- the title used to hard-clip to "Bearka..."/"Be...".
+       Let it wrap onto a second line instead of fighting the other header items for width. */
+    @media (max-width: 420px) {
+      /* !important needed: the span's own inline style="white-space:nowrap;..." otherwise
+         always wins over a stylesheet rule regardless of selector, inline or not. */
+      .shsu-title { white-space: normal !important; font-size: 16px !important; line-height: 1.2 !important; }
+      /* The status badge ("Offline - Foundry Local" / "Cloud - Gemini") was squeezing the
+         title down to ~40px on narrow phones -- the badge is supplementary status info,
+         not needed to use the chat, so it's the one that gives up its space here. */
+      .shsu-badge { display: none !important; }
+    }
+    /* The cookie banner (position:absolute, bottom:0) overlays the scrollable content
+       instead of pushing it up, so on short/narrow phones (e.g. 360x800) it can cover the
+       last suggestion chip until dismissed. Reserve scroll room so it's always scrollable
+       into view instead of trapped behind the banner. */
+    @media (max-width: 480px) {
+      .shsu-scroll { padding-bottom: 96px; }
+    }
   </style>
 </helmet>
 <div style="display:flex;flex-direction:row;height:100vh;min-height:520px;color:var(--color-text);font-family:var(--font-body);overflow:hidden;position:relative;">
@@ -90,11 +109,11 @@
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16"></path><path d="M4 12h16"></path><path d="M4 18h16"></path></svg>
       </button>
       <div style="display:flex;flex-direction:column;line-height:1.12;min-width:0;">
-        <span style="font-family:var(--font-heading);font-size:19px;color:var(--color-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ botName }}</span>
+        <span class="shsu-title" style="font-family:var(--font-heading);font-size:19px;color:var(--color-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ botName }}</span>
         <span style="font-size:12px;color:var(--color-accent-2-700);letter-spacing:.02em;">{{ tagline }}</span>
       </div>
       <div style="flex:1;"></div>
-      <div style="display:inline-flex;align-items:center;gap:7px;padding:6px 12px;border-radius:999px;background:var(--color-accent-2-100);color:var(--color-accent-2-700);font-size:11.5px;font-weight:600;" data-offline="">
+      <div class="shsu-badge" style="display:inline-flex;align-items:center;gap:7px;padding:6px 12px;border-radius:999px;background:var(--color-accent-2-100);color:var(--color-accent-2-700);font-size:11.5px;font-weight:600;" data-offline="">
         <span style="width:7px;height:7px;border-radius:999px;background:var(--color-accent-2-500);display:inline-block;"></span>{{ offlineLabel }}
       </div>
       <div style="display:inline-flex;overflow:hidden;border-radius:999px;border:1px solid rgba(255,255,255,.7);background:rgba(255,255,255,.6);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);flex:none;">
