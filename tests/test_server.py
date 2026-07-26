@@ -299,3 +299,39 @@ def test_index_html_direct_path_also_gets_the_backend_injected(monkeypatch):
 
     assert response.status_code == 200
     assert 'window.__RAG_CHAT_BACKEND__ = "gemini";' in response.text
+
+
+def test_get_db_connection_gives_each_thread_its_own_connection(monkeypatch, tmp_path):
+    # A single connection shared across threads (the old behavior) broke two ways: using
+    # it from a thread other than the one that created it raised outright (fixed by
+    # check_same_thread=False, rag/store.py), and even with that flag, truly concurrent
+    # access from multiple threads to the SAME connection object was still unsafe -- a
+    # synthetic burst of 6 concurrent requests failed 5/6 live (see .claude/HANDOFF.md's
+    # 2026-07-26 incident). One connection per thread removes the sharing entirely.
+    import threading
+
+    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "test.db"))
+    monkeypatch.setattr(server, "_db_conn_local", threading.local())
+
+    connections = []
+    errors = []
+    barrier = threading.Barrier(6)
+
+    def worker():
+        try:
+            barrier.wait()  # line every thread up so they hit _get_db_connection() together
+            conn = server._get_db_connection()
+            conn.execute("SELECT 1")
+            connections.append(conn)
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    assert len(connections) == 6
+    assert len({id(c) for c in connections}) == 6  # each thread got its own connection

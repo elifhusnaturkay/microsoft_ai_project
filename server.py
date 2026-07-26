@@ -14,7 +14,7 @@ import re
 import time
 from collections import defaultdict, deque
 from pathlib import Path
-from threading import Lock
+from threading import Lock, local
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -64,7 +64,7 @@ REFUSAL_TEXT = {
 app = FastAPI(title="SHSU Transfer Assistant")
 
 _embedder = None
-_db_conn = None
+_db_conn_local = local()
 
 
 def _get_embedder():
@@ -75,10 +75,24 @@ def _get_embedder():
 
 
 def _get_db_connection():
-    global _db_conn
-    if _db_conn is None:
-        _db_conn = store.init_db(config.DB_PATH)
-    return _db_conn
+    """One SQLite connection per thread, not one shared globally.
+
+    FastAPI runs sync route handlers (ask() is `def`, not `async def`) in a thread-pool,
+    and a single connection shared across threads broke two different ways: first, using
+    it from a thread other than the one that created it raised outright (fixed by
+    check_same_thread=False in rag/store.py's init_db) -- but that flag only lifts
+    Python's same-thread check, it does not make ONE connection object safe for multiple
+    threads to query at the *same instant*. A synthetic burst of 6 concurrent requests
+    still failed 5/6 even with that flag, and real concurrent traffic (a genuine question
+    landing at the same moment as Render's own health-check GET / on another worker
+    thread) reproduced it live -- see .claude/HANDOFF.md's 2026-07-26 incident. Giving each
+    thread its own dedicated connection removes the sharing entirely, so there's nothing
+    left to race on; SQLite's file-level locking already handles concurrent reads safely
+    across separate connections.
+    """
+    if not hasattr(_db_conn_local, "conn"):
+        _db_conn_local.conn = store.init_db(config.DB_PATH)
+    return _db_conn_local.conn
 
 
 class AskRequest(BaseModel):
