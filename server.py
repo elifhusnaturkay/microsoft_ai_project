@@ -16,6 +16,7 @@ from pathlib import Path
 from threading import Lock
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -138,6 +139,23 @@ def ask(request: AskRequest, http_request: Request = None):
         raise HTTPException(status_code=503, detail="Chat backend unavailable")
 
 
-# Registered last: an explicit route above (like /api/ask) always wins over this
-# catch-all mount, but anything else falls through to the static chat UI.
+@app.get("/", include_in_schema=False)
+@app.get("/index.html", include_in_schema=False)
+def index() -> HTMLResponse:
+    # S-01: static/index.html's connection-status badge used to hardcode "Offline - Foundry
+    # Local" text, which is false on the public Render deployment (RAG_CHAT_BACKEND=gemini --
+    # see rag/config.py). Inject the *actual* configured chat backend into the page so the
+    # frontend (see static/index.html's business-logic script, near
+    # `__RAG_CHAT_BACKEND_VALUE__`) can show an honest label instead of a claim that doesn't
+    # match where questions go.
+    # (Also registered at /index.html, not just /, so the raw un-templated file underneath
+    # the StaticFiles mount below can't be reached directly and re-expose the stale claim.)
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    html = html.replace("__RAG_CHAT_BACKEND_VALUE__", config.CHAT_BACKEND)
+    return HTMLResponse(html)
+
+
+# Registered last: explicit routes above (like /api/ask and /) always win over this
+# catch-all mount, but anything else (styles.css, vendor/*, uploads/*, ...) falls through
+# to the static asset directory.
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

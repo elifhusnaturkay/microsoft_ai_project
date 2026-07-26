@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="./vendor/react.production.min.js"></script>
 <script src="./vendor/react-dom.production.min.js"></script>
+<script>window.__RAG_CHAT_BACKEND__ = "__RAG_CHAT_BACKEND_VALUE__";</script>
 <script src="./support.js"></script>
 </head>
 <body>
@@ -280,7 +281,7 @@
 </x-dc>
 <script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1040,&quot;height&quot;:760},&quot;defaultLang&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;tr&quot;,&quot;en&quot;],&quot;default&quot;:&quot;tr&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;İçerik&quot;},&quot;botName&quot;:{&quot;editor&quot;:&quot;text&quot;,&quot;default&quot;:&quot;Bearkat Rehber&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;İçerik&quot;},&quot;showCategories&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;İçerik&quot;}}">
 const STR = {
-  tr:{ botName:'Bearkat Rehber', tagline:'SHSU Transfer Asistanı', offlineLabel:'Çevrimdışı · Foundry Local',
+  tr:{ botName:'Bearkat Rehber', tagline:'SHSU Transfer Asistanı', offlineLabel:'Çevrimdışı · Foundry Local', cloudLabel:'Bulut · Gemini',
        greetingTitle:'Transfer sorularını yanıtlamak için buradayım', greetingSub:'SHSU\'ya transfer süreci, ücretler, vize, konut ve burslar — ne merak ediyorsan sor. İstersen önce bir konu seç.',
        catsTitle:'Bir konu seç (opsiyonel)', placeholder:'Sorunu yaz…  örn. yıllık maliyet ne kadar?', sourcesLabel:'Kaynaklar', thinkingLabel:'Düşünüyor',
        footnote:'Yanıtlar SHSU belgelerinden üretilir · yanlış olabilir, resmi kaynaktan teyit et',
@@ -293,7 +294,7 @@ const STR = {
        ckNecessary:'Zorunlu', ckNecessaryDesc:'Uygulamanın çalışması için gerekli. Her zaman açık.',
        ckAnalytics:'Analitik', ckAnalyticsDesc:'Hangi soruların sorulduğunu anonim ölçer.',
        ckPrefs:'Tercihler', ckPrefsDesc:'Dil seçimini ve son sohbetlerini bu cihazda hatırlar.' },
-  en:{ botName:'Bearkat Guide', tagline:'SHSU Transfer Assistant', offlineLabel:'Offline · Foundry Local',
+  en:{ botName:'Bearkat Guide', tagline:'SHSU Transfer Assistant', offlineLabel:'Offline · Foundry Local', cloudLabel:'Cloud · Gemini',
        greetingTitle:'Here to answer your transfer questions', greetingSub:'The SHSU transfer process, costs, visa, housing and scholarships — ask anything. Pick a topic first if you like.',
        catsTitle:'Pick a topic (optional)', placeholder:'Type your question…  e.g. how much is the annual cost?', sourcesLabel:'Sources', thinkingLabel:'Thinking',
        footnote:'Answers are generated from SHSU documents · may be wrong, verify with official sources',
@@ -342,9 +343,19 @@ function icon(id, size){
 const LS_CHATS = 'shsu_chats_v1';
 const LS_COOKIE = 'shsu_cookie_v1';
 
+// Set by server.py's GET "/" route (see index() there), which replaces the
+// __RAG_CHAT_BACKEND_VALUE__ placeholder with rag/config.py's actual CHAT_BACKEND value
+// ("foundry"/"ollama" locally, "gemini" on the public Render deploy). Only "gemini" is
+// a non-local/cloud backend today.
+function activeChatBackend(){
+  const v = (typeof window !== 'undefined') ? window.__RAG_CHAT_BACKEND__ : undefined;
+  return (v && v.indexOf('__RAG_CHAT_BACKEND_VALUE__') === -1) ? v : 'foundry';
+}
+
 class Component extends DCLogic {
   constructor(props){
     super(props);
+    this.chatBackend = activeChatBackend();
     this.state = {
       lang: (props.defaultLang === 'en' ? 'en' : 'tr'),
       messages: [], input: '', thinking: false, activeCat: null,
@@ -449,7 +460,7 @@ class Component extends DCLogic {
 
     return {
       botName: this.props.botName || t.botName,
-      tagline: t.tagline, offlineLabel: t.offlineLabel,
+      tagline: t.tagline, offlineLabel: (this.chatBackend === 'gemini') ? t.cloudLabel : t.offlineLabel,
       greetingTitle: t.greetingTitle, greetingSub: t.greetingSub, catsTitle: t.catsTitle,
       placeholder: t.placeholder, sourcesLabel: t.sourcesLabel, thinkingLabel: t.thinkingLabel,
       footnote: t.footnote, filterLabel: t.filterLabel,

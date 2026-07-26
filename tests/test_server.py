@@ -185,3 +185,45 @@ def test_rate_limit_is_scoped_per_ip(monkeypatch, client):
 
     # A different client IP should not be affected by the first client's exhausted quota.
     assert server._check_rate_limit("203.0.113.7") is True
+
+
+# --- S-01: the served page must reflect the *actual* active chat backend, not a hardcoded
+# "Offline - Foundry Local" claim -- the public Render deployment runs RAG_CHAT_BACKEND=gemini
+# (a cloud API), and telling users their questions stay local/offline when they're actually
+# sent to Google's Gemini API is a privacy-transparency bug, not a cosmetic one.
+
+def test_index_page_embeds_the_configured_chat_backend_when_gemini(monkeypatch):
+    monkeypatch.setattr(config, "CHAT_BACKEND", "gemini")
+    client = TestClient(server.app)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert 'window.__RAG_CHAT_BACKEND__ = "gemini";' in response.text
+    # The raw template placeholder must never leak to the browser, and the identifier
+    # name itself (which shares a substring with the placeholder) must survive intact --
+    # a naive global string replace could clobber "window.__RAG_CHAT_BACKEND__" too.
+    assert "__RAG_CHAT_BACKEND_VALUE__" not in response.text
+    assert "window.__RAG_CHAT_BACKEND__ =" in response.text
+
+
+def test_index_page_embeds_the_configured_chat_backend_when_local(monkeypatch):
+    monkeypatch.setattr(config, "CHAT_BACKEND", "foundry")
+    client = TestClient(server.app)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert 'window.__RAG_CHAT_BACKEND__ = "foundry";' in response.text
+
+
+def test_index_html_direct_path_also_gets_the_backend_injected(monkeypatch):
+    # StaticFiles(html=True) would otherwise also serve the raw, un-templated file directly
+    # at /index.html, bypassing the injection and re-exposing the stale claim.
+    monkeypatch.setattr(config, "CHAT_BACKEND", "gemini")
+    client = TestClient(server.app)
+
+    response = client.get("/index.html")
+
+    assert response.status_code == 200
+    assert 'window.__RAG_CHAT_BACKEND__ = "gemini";' in response.text
