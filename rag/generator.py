@@ -22,6 +22,7 @@ foundry-local-sdk==0.5.1 source (see rag/embedder.py's module docstring and
 requirements.txt for details on why that exact pre-1.0 version is pinned).
 """
 import re
+import time
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Tuple
 
@@ -319,10 +320,18 @@ class GeminiChat(ChatBackend):
         if max_tokens is not None:
             config_kwargs["max_output_tokens"] = max_tokens
 
-        response = self._client.models.generate_content(
-            model=self.model_name,
-            contents=user_prompt,
-            config=types.GenerateContentConfig(**config_kwargs),
+        # A class of real students asking questions around the same time can trip
+        # Gemini's per-minute quota even when each individual request is legitimate
+        # (see .claude/HANDOFF.md's 2026-07-26 incident, where concurrent debugging
+        # traffic alone repeatedly triggered 429s) -- a couple of short retries turn
+        # that into a few seconds of extra latency instead of a hard failure for
+        # whoever's request happened to land during the spike.
+        response = self._call_with_retry(
+            lambda: self._client.models.generate_content(
+                model=self.model_name,
+                contents=user_prompt,
+                config=types.GenerateContentConfig(**config_kwargs),
+            )
         )
         # response.text is None either because Gemini's own safety layer declined to
         # answer (finish_reason SAFETY/PROHIBITED_CONTENT/etc, empty content.parts) or
@@ -342,6 +351,24 @@ class GeminiChat(ChatBackend):
                 )
             raise ContentBlocked(f"Gemini declined to respond (finish_reason={finish_reason})")
         return response.text
+
+    @staticmethod
+    def _call_with_retry(fn, max_attempts: int = 3, backoff_seconds: float = 1.5):
+        """Retries fn() on Gemini's transient failure codes -- quota blips (429
+        RESOURCE_EXHAUSTED) and momentary server-side overload (500/503/504). NOT
+        retried: 400 (bad argument -- e.g. an incompatible thinking_config, see the
+        NOTE in generate() above), 401/403 (bad key), or anything else where trying
+        the identical request again can't change the outcome."""
+        from google.genai.errors import APIError
+
+        retryable_codes = {429, 500, 503, 504}
+        for attempt in range(max_attempts):
+            try:
+                return fn()
+            except APIError as e:
+                if e.code not in retryable_codes or attempt == max_attempts - 1:
+                    raise
+                time.sleep(backoff_seconds * (attempt + 1))
 
 
 def get_chat_backend(backend: str = None) -> ChatBackend:

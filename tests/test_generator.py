@@ -191,23 +191,34 @@ class _FakeGeminiResponse:
 
 
 class _FakeModels:
-    def __init__(self, response):
-        self._response = response
+    def __init__(self, side_effects):
+        # Each entry is either a response object to return, or an Exception instance
+        # to raise -- consumed in order, one per generate_content() call.
+        self._side_effects = list(side_effects)
         self.last_config = None
+        self.call_count = 0
 
     def generate_content(self, model, contents, config):
         self.last_config = config
-        return self._response
+        self.call_count += 1
+        effect = self._side_effects.pop(0)
+        if isinstance(effect, Exception):
+            raise effect
+        return effect
 
 
 class _FakeGeminiClient:
-    def __init__(self, response):
-        self.models = _FakeModels(response)
+    def __init__(self, side_effects):
+        self.models = _FakeModels(side_effects)
 
 
 def _gemini_chat_with_fake_response(response) -> tuple[GeminiChat, _FakeGeminiClient]:
+    return _gemini_chat_with_side_effects([response])
+
+
+def _gemini_chat_with_side_effects(side_effects) -> tuple[GeminiChat, _FakeGeminiClient]:
     chat = GeminiChat(model_name="gemini-flash-latest")
-    client = _FakeGeminiClient(response)
+    client = _FakeGeminiClient(side_effects)
     chat._client = client  # bypasses _ensure_client's genai.Client() construction
     return chat, client
 
@@ -251,3 +262,47 @@ def test_gemini_chat_still_raises_content_blocked_on_safety_finish_reason():
 
     with pytest.raises(ContentBlocked):
         chat.generate("system", "user", max_tokens=100)
+
+
+def test_gemini_chat_retries_on_429_then_succeeds(monkeypatch):
+    # Concurrent real users can trip Gemini's per-minute quota transiently (see
+    # .claude/HANDOFF.md's 2026-07-26 incident) -- a request that would otherwise fail
+    # outright should recover if the very next attempt succeeds.
+    from google.genai.errors import ClientError
+
+    monkeypatch.setattr("rag.generator.time.sleep", lambda seconds: None)
+    quota_error = ClientError(429, {"message": "Resource exhausted", "status": "RESOURCE_EXHAUSTED"})
+    chat, client = _gemini_chat_with_side_effects([quota_error, _FakeGeminiResponse("Recovered.")])
+
+    result = chat.generate("system", "user", max_tokens=100)
+
+    assert result == "Recovered."
+    assert client.models.call_count == 2
+
+
+def test_gemini_chat_gives_up_after_max_attempts_of_persistent_429(monkeypatch):
+    from google.genai.errors import ClientError
+
+    monkeypatch.setattr("rag.generator.time.sleep", lambda seconds: None)
+    quota_error = ClientError(429, {"message": "Resource exhausted", "status": "RESOURCE_EXHAUSTED"})
+    chat, client = _gemini_chat_with_side_effects([quota_error, quota_error, quota_error, quota_error])
+
+    with pytest.raises(ClientError):
+        chat.generate("system", "user", max_tokens=100)
+    assert client.models.call_count == 3  # default max_attempts, not endless
+
+
+def test_gemini_chat_does_not_retry_on_400_bad_argument(monkeypatch):
+    # A bad argument (e.g. an incompatible thinking_config) will fail identically on
+    # every attempt -- retrying just adds latency for a guaranteed-to-fail request.
+    from google.genai.errors import ClientError
+
+    monkeypatch.setattr("rag.generator.time.sleep", lambda seconds: (_ for _ in ()).throw(
+        AssertionError("should not sleep/retry on a non-retryable 400")
+    ))
+    bad_arg_error = ClientError(400, {"message": "Request contains an invalid argument.", "status": "INVALID_ARGUMENT"})
+    chat, client = _gemini_chat_with_side_effects([bad_arg_error])
+
+    with pytest.raises(ClientError):
+        chat.generate("system", "user", max_tokens=100)
+    assert client.models.call_count == 1
