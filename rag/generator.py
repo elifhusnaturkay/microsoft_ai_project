@@ -272,7 +272,7 @@ class OllamaChat(ChatBackend):
 
 
 class GeminiChat(ChatBackend):
-    """Gemini 2.5 Flash via the Gemini API -- optional cloud-deploy path (RAG_CHAT_BACKEND=gemini),
+    """Gemini Flash via the Gemini API -- optional cloud-deploy path (RAG_CHAT_BACKEND=gemini),
     not the offline default. `genai.Client()` reads GEMINI_API_KEY from the environment itself."""
 
     def __init__(self, model_name: str = None):
@@ -297,15 +297,24 @@ class GeminiChat(ChatBackend):
         self._ensure_client()
         from google.genai import types
 
-        # Gemini 2.5 Flash thinks by default, and thinking tokens count against
+        # Gemini Flash thinks by default, and thinking tokens count against
         # max_output_tokens -- with the short caps this project uses (see config.py's
         # MAX_ANSWER_TOKENS/MAX_TRANSLATE_TOKENS), that silently starves the visible
         # answer (finish_reason=MAX_TOKENS, response.text=None) before it's written.
         # This is a short-citation-answer bot, not a reasoning task, so thinking is
-        # disabled outright rather than budgeted around.
+        # minimized rather than budgeted around.
+        #
+        # NOTE: thinking_budget=0 (hard-disable) was the original approach and worked on
+        # Gemini 2.5 Flash, but gemini-flash-latest now resolves to a newer model family
+        # (observed: gemini-3.6-flash) that rejects thinking_budget=0 outright with
+        # `400 INVALID_ARGUMENT` -- this broke the live deployment (see .claude/HANDOFF.md's
+        # 2026-07-26 root-cause note). thinking_level=MINIMAL is that family's own knob for
+        # the same goal; there's no documented "off" level, so a short answer bot with these
+        # token caps still needs MAX_TOKENS truncation handled below as a real possibility,
+        # not just a safety-refusal signal.
         config_kwargs = {
             "system_instruction": system_prompt,
-            "thinking_config": types.ThinkingConfig(thinking_budget=0),
+            "thinking_config": types.ThinkingConfig(thinking_level=types.ThinkingLevel.MINIMAL),
         }
         if max_tokens is not None:
             config_kwargs["max_output_tokens"] = max_tokens
@@ -315,13 +324,22 @@ class GeminiChat(ChatBackend):
             contents=user_prompt,
             config=types.GenerateContentConfig(**config_kwargs),
         )
-        # response.text is None whenever Gemini's own safety layer declined to answer
-        # (finish_reason SAFETY/PROHIBITED_CONTENT/etc, empty content.parts) -- with
-        # thinking disabled above, a normal answer always has text, so None here means
-        # "refused," not "empty." Surface that distinctly instead of returning None
-        # (which would blow up downstream in parse_segments expecting a string).
+        # response.text is None either because Gemini's own safety layer declined to
+        # answer (finish_reason SAFETY/PROHIBITED_CONTENT/etc, empty content.parts) or
+        # because thinking_level=MINIMAL above still spent the whole max_output_tokens
+        # budget on hidden thinking before writing any visible answer (finish_reason=
+        # MAX_TOKENS -- a real possibility now that thinking can't be hard-disabled, see
+        # the NOTE above). Only the former is a deliberate refusal; conflating the two
+        # used to make a token-budget failure surface as the bot's in-character "I won't
+        # do that" refusal text, which is misleading -- so MAX_TOKENS is raised as a
+        # plain RuntimeError instead, which server.py's generic handler turns into 503.
         if response.text is None:
             finish_reason = response.candidates[0].finish_reason if response.candidates else None
+            if finish_reason == types.FinishReason.MAX_TOKENS:
+                raise RuntimeError(
+                    f"Gemini exhausted max_output_tokens={max_tokens} before writing a visible "
+                    "answer (likely spent on hidden thinking -- see GeminiChat.generate's NOTE)"
+                )
             raise ContentBlocked(f"Gemini declined to respond (finish_reason={finish_reason})")
         return response.text
 

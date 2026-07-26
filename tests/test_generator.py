@@ -7,6 +7,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from rag.generator import (
+    ContentBlocked,
     FoundryLocalChat,
     GeminiChat,
     OllamaChat,
@@ -176,3 +177,77 @@ def test_get_chat_backend_gemini():
 def test_get_chat_backend_unknown_raises_with_all_three_names():
     with pytest.raises(ValueError, match="foundry.*ollama.*gemini"):
         get_chat_backend("nonexistent")
+
+
+class _FakeCandidate:
+    def __init__(self, finish_reason):
+        self.finish_reason = finish_reason
+
+
+class _FakeGeminiResponse:
+    def __init__(self, text, finish_reason=None):
+        self.text = text
+        self.candidates = [_FakeCandidate(finish_reason)] if finish_reason is not None else []
+
+
+class _FakeModels:
+    def __init__(self, response):
+        self._response = response
+        self.last_config = None
+
+    def generate_content(self, model, contents, config):
+        self.last_config = config
+        return self._response
+
+
+class _FakeGeminiClient:
+    def __init__(self, response):
+        self.models = _FakeModels(response)
+
+
+def _gemini_chat_with_fake_response(response) -> tuple[GeminiChat, _FakeGeminiClient]:
+    chat = GeminiChat(model_name="gemini-flash-latest")
+    client = _FakeGeminiClient(response)
+    chat._client = client  # bypasses _ensure_client's genai.Client() construction
+    return chat, client
+
+
+def test_gemini_chat_uses_thinking_level_minimal_not_thinking_budget():
+    # thinking_budget=0 (the old hard-disable knob) started raising 400 INVALID_ARGUMENT
+    # once gemini-flash-latest moved to a newer model family that doesn't support it --
+    # this pins the fix (thinking_level=MINIMAL) so a future SDK/model swap can't silently
+    # regress back to the field that broke prod (see .claude/HANDOFF.md's 2026-07-26 note).
+    from google.genai import types
+
+    chat, client = _gemini_chat_with_fake_response(_FakeGeminiResponse("An answer."))
+    result = chat.generate("system", "user", max_tokens=100)
+
+    assert result == "An answer."
+    thinking_config = client.models.last_config.thinking_config
+    assert thinking_config.thinking_level == types.ThinkingLevel.MINIMAL
+    assert thinking_config.thinking_budget is None
+
+
+def test_gemini_chat_raises_runtime_error_when_thinking_exhausts_the_token_budget():
+    from google.genai import types
+
+    chat, _ = _gemini_chat_with_fake_response(
+        _FakeGeminiResponse(None, finish_reason=types.FinishReason.MAX_TOKENS)
+    )
+
+    # MAX_TOKENS must NOT raise ContentBlocked -- that would show the user the bot's
+    # in-character refusal text for what is actually a token-budget failure.
+    with pytest.raises(RuntimeError) as exc_info:
+        chat.generate("system", "user", max_tokens=60)
+    assert not isinstance(exc_info.value, ContentBlocked)
+
+
+def test_gemini_chat_still_raises_content_blocked_on_safety_finish_reason():
+    from google.genai import types
+
+    chat, _ = _gemini_chat_with_fake_response(
+        _FakeGeminiResponse(None, finish_reason=types.FinishReason.SAFETY)
+    )
+
+    with pytest.raises(ContentBlocked):
+        chat.generate("system", "user", max_tokens=100)
