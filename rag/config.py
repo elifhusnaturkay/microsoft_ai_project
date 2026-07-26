@@ -51,5 +51,5 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 
 # Gemini model names -- optional cloud-deploy path (RAG_CHAT_BACKEND/RAG_EMBED_BACKEND=gemini),
 # not the offline default. See rag/generator.py's GeminiChat / rag/embedder.py's GeminiEmbedder.
-GEMINI_CHAT_MODEL = os.environ.get("RAG_GEMINI_CHAT_MODEL", "gemini-2.5-flash")
+GEMINI_CHAT_MODEL = os.environ.get("RAG_GEMINI_CHAT_MODEL", "gemini-flash-latest")
 GEMINI_EMBED_MODEL = os.environ.get("RAG_GEMINI_EMBED_MODEL", "gemini-embedding-001")
