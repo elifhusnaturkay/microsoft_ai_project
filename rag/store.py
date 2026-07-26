@@ -23,9 +23,23 @@ CREATE TABLE IF NOT EXISTS chunks (
 
 
 def init_db(db_path) -> sqlite3.Connection:
-    """Open (creating if needed) the SQLite DB and ensure the chunks table exists."""
+    """Open (creating if needed) the SQLite DB and ensure the chunks table exists.
+
+    check_same_thread=False: server.py caches a single connection for the process
+    lifetime (see its _get_db_connection), but FastAPI runs each sync route handler
+    (ask() is `def`, not `async def`) in a thread-pool worker -- a different request
+    can land on a different thread than the one that created the connection. Without
+    this flag, that raised `sqlite3.ProgrammingError: SQLite objects created in a
+    thread can only be used in that same thread` on every request that happened to
+    land on a different worker thread than the first one -- intermittent by nature
+    (whichever thread the pool picked), which is exactly the "sometimes works,
+    sometimes doesn't" behavior reported live on 2026-07-26 (see .claude/HANDOFF.md).
+    Safe here: default Python sqlite3 builds use SQLite's serialized threading mode,
+    and this DB is read-only at request time (writes only happen offline via
+    ingest.py, never concurrently with serving).
+    """
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.execute(SCHEMA)
     conn.commit()
     return conn
