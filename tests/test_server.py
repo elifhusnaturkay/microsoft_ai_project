@@ -443,6 +443,83 @@ def test_ask_passes_client_supplied_history_through_to_answer_query(monkeypatch)
     ]
 
 
+# --- Rate-limited questions must still reach the query log (previously the rate-limit
+# check ran before question/language were even parsed, so a throttled request left no
+# trace of what was actually asked).
+
+def test_ask_logs_a_rate_limited_question_as_unanswered(client, query_log_db):
+    for _ in range(server.RATE_LIMIT_MAX_REQUESTS):
+        client.post("/api/ask", json={"question": "hi", "language": "en"})
+
+    response = client.post("/api/ask", json={"question": "how much is tuition?", "language": "en"})
+
+    assert response.status_code == 429
+    rows = _read_query_log_rows(query_log_db)
+    assert rows[-1] == ("how much is tuition?", "en", 0, 0)
+
+
+def test_ask_does_not_log_a_rate_limited_empty_question(client, query_log_db):
+    # Consistent with the existing "an empty question isn't a real question" rule below --
+    # it must not gain an exception just because it also happened to hit the rate limit.
+    for _ in range(server.RATE_LIMIT_MAX_REQUESTS):
+        client.post("/api/ask", json={"question": "hi", "language": "en"})
+    rows_before = _read_query_log_rows(query_log_db)
+
+    response = client.post("/api/ask", json={"question": "   ", "language": "en"})
+
+    assert response.status_code == 429
+    assert _read_query_log_rows(query_log_db) == rows_before
+
+
+# --- GET /api/admin/queries: hidden-token-gated view of the query log. Returns 404 (not
+# 401/403) for anything but an exact token match, including when RAG_ADMIN_TOKEN is unset --
+# see server.py's _admin_token_is_valid for why.
+
+@pytest.fixture
+def admin_token(monkeypatch):
+    monkeypatch.setattr(config, "ADMIN_TOKEN", "s3cr3t-token")
+    return "s3cr3t-token"
+
+
+def test_admin_queries_with_correct_token_returns_recent_queries_newest_first(query_log_db, admin_token):
+    conn = query_log.init_db(str(query_log_db))
+    query_log.insert_query(conn, "first?", "en", num_sources=1, was_answered=True)
+    query_log.insert_query(conn, "second?", "en", num_sources=0, was_answered=False)
+
+    response = TestClient(server.app).get("/api/admin/queries", params={"token": admin_token})
+
+    assert response.status_code == 200
+    questions = [row["question"] for row in response.json()["queries"]]
+    assert questions == ["second?", "first?"]
+
+
+def test_admin_queries_with_wrong_token_returns_404(query_log_db, admin_token):
+    response = TestClient(server.app).get("/api/admin/queries", params={"token": "wrong-token"})
+
+    assert response.status_code == 404
+
+
+def test_admin_queries_returns_404_when_admin_token_is_unset(monkeypatch, query_log_db):
+    monkeypatch.setattr(config, "ADMIN_TOKEN", "")
+
+    # An unset ADMIN_TOKEN must reject EVERY token, including an empty one -- "" == ""
+    # must not accidentally authenticate a caller who sent no token at all.
+    assert TestClient(server.app).get("/api/admin/queries", params={"token": ""}).status_code == 404
+    assert TestClient(server.app).get("/api/admin/queries", params={"token": "anything"}).status_code == 404
+    assert TestClient(server.app).get("/api/admin/queries").status_code == 404
+
+
+def test_admin_queries_limit_param_bounds_the_result_count(query_log_db, admin_token):
+    conn = query_log.init_db(str(query_log_db))
+    for i in range(5):
+        query_log.insert_query(conn, f"q{i}?", "en", num_sources=0, was_answered=False)
+
+    response = TestClient(server.app).get("/api/admin/queries", params={"token": admin_token, "limit": 2})
+
+    assert response.status_code == 200
+    assert len(response.json()["queries"]) == 2
+
+
 def test_ask_request_rejects_more_than_50_history_messages():
     with pytest.raises(Exception):  # pydantic.ValidationError
         server.AskRequest(

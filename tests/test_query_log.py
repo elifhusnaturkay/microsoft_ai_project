@@ -47,6 +47,42 @@ def test_insert_query_stores_was_answered_false_as_zero():
         assert row[0] == 0
 
 
+def test_get_recent_queries_returns_newest_first():
+    with tempfile.TemporaryDirectory() as tmp:
+        conn = query_log.init_db(str(Path(tmp) / "queries.db"))
+        query_log.insert_query(conn, "first?", "en", num_sources=1, was_answered=True)
+        query_log.insert_query(conn, "second?", "en", num_sources=0, was_answered=False)
+
+        rows = query_log.get_recent_queries(conn)
+
+        assert [row["question"] for row in rows] == ["second?", "first?"]
+
+
+def test_get_recent_queries_respects_limit():
+    with tempfile.TemporaryDirectory() as tmp:
+        conn = query_log.init_db(str(Path(tmp) / "queries.db"))
+        for i in range(5):
+            query_log.insert_query(conn, f"q{i}?", "en", num_sources=0, was_answered=False)
+
+        rows = query_log.get_recent_queries(conn, limit=2)
+
+        assert [row["question"] for row in rows] == ["q4?", "q3?"]
+
+
+def test_get_recent_queries_shape_and_types():
+    with tempfile.TemporaryDirectory() as tmp:
+        conn = query_log.init_db(str(Path(tmp) / "queries.db"))
+        query_log.insert_query(conn, "how much is tuition?", "en", num_sources=2, was_answered=True)
+
+        row = query_log.get_recent_queries(conn)[0]
+
+        assert set(row.keys()) == {"id", "question", "language", "created_at", "num_sources", "was_answered"}
+        assert row["question"] == "how much is tuition?"
+        assert row["language"] == "en"
+        assert row["num_sources"] == 2
+        assert row["was_answered"] is True  # int-in-DB coerced to a real bool, not 1/0
+
+
 def test_connection_from_init_db_is_usable_from_a_different_thread():
     # Same reasoning as rag/store.py's init_db -- server.py caches this connection per
     # thread, but FastAPI runs ask() in a thread-pool worker (see server.py's

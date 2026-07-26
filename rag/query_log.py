@@ -7,6 +7,7 @@ this one must persist across those runs.
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Dict, List
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS query_log (
@@ -47,3 +48,24 @@ def insert_query(
         (question, language, datetime.now(timezone.utc).isoformat(), num_sources, int(was_answered)),
     )
     conn.commit()
+
+
+def get_recent_queries(conn: sqlite3.Connection, limit: int = 100) -> List[Dict]:
+    """Return the `limit` most recently logged queries, newest first (see server.py's
+    GET /api/admin/queries)."""
+    rows = conn.execute(
+        "SELECT id, question, language, created_at, num_sources, was_answered "
+        "FROM query_log ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [
+        {
+            "id": row[0],
+            "question": row[1],
+            "language": row[2],
+            "created_at": row[3],
+            "num_sources": row[4],
+            "was_answered": bool(row[5]),
+        }
+        for row in rows
+    ]
