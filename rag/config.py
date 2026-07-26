@@ -11,6 +11,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DOCS_DIR = Path(os.environ.get("RAG_DOCS_DIR", str(PROJECT_ROOT / "docs")))
 DB_PATH = os.environ.get("RAG_DB_PATH", str(PROJECT_ROOT / "knowledge.db"))
 
+# Deliberately a separate file from DB_PATH -- scripts/ingest.py deletes and repopulates
+# the chunks table in DB_PATH on every deploy (--reset), and query_log must survive that.
+QUERY_LOG_DB_PATH = os.environ.get("RAG_QUERY_LOG_DB_PATH", str(PROJECT_ROOT / "queries.db"))
+
 # Retrieval
 TOP_K = int(os.environ.get("RAG_TOP_K", "3"))
 
@@ -26,6 +30,13 @@ MIN_SIMILARITY = float(os.environ.get("RAG_MIN_SIMILARITY", "0.42"))
 # tighter cap. Both overridable per-deployment/hardware.
 MAX_ANSWER_TOKENS = int(os.environ.get("RAG_MAX_ANSWER_TOKENS", "300"))
 MAX_TRANSLATE_TOKENS = int(os.environ.get("RAG_MAX_TRANSLATE_TOKENS", "60"))
+
+# Conversation memory: how many prior chat messages (user+assistant combined, most-recent-
+# first when trimming) are folded into the prompt so a follow-up question ("peki ya X?")
+# can refer back to what was just discussed. Kept small -- this is a short-citation-answer
+# bot, not a long-running assistant, and each extra turn adds input tokens/latency for
+# every subsequent question in the conversation.
+MAX_HISTORY_MESSAGES = int(os.environ.get("RAG_MAX_HISTORY_MESSAGES", "6"))
 
 # Chunking (paragraph-based, ~200-500 words per PROJECT_PLAN.md)
 MIN_CHUNK_WORDS = int(os.environ.get("RAG_MIN_CHUNK_WORDS", "200"))

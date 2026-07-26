@@ -404,13 +404,27 @@ class Component extends DCLogic {
   // Real backend call: rag/retriever.py + rag/generator.py via server.py's /api/ask.
   // Returns {"segments":[{"txt":...} | {"c": n}, ...], "sources":[{"name","url"}, ...]}
   // -- see rag/generator.py's answer_query() for the exact shape this consumes.
-  async fetchAnswer(q){
+  //
+  // priorMessages: the chat's message list from BEFORE this question was appended (send()
+  // passes a snapshot taken before its setState, so this doesn't depend on setState having
+  // already applied by the time fetchAnswer reads state). Reduced to the same {role,text}
+  // shape the backend's AskRequest.history expects -- assistant messages only ever have
+  // `segments` (not a plain `text` field, see renderVals() above), so their text is
+  // reconstructed by re-joining segment text with `[n]` markers for citation chips, which
+  // round-trips back into the same [n] citation format the model itself produces.
+  async fetchAnswer(q, priorMessages){
     const lang = this.state.lang;
+    const history = (priorMessages || []).slice(-6).map(m => ({
+      role: m.role === 'user' ? 'user' : 'assistant',
+      text: m.role === 'user'
+        ? (m.text || '')
+        : (m.segments || []).map(s => ('c' in s) ? ('[' + s.c + ']') : (s.txt || '')).join(''),
+    }));
     try {
       const resp = await fetch('/api/ask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: q, language: lang }),
+        body: JSON.stringify({ question: q, language: lang, history }),
       });
       if(!resp.ok) throw new Error('backend returned ' + resp.status);
       const data = await resp.json();
@@ -439,8 +453,9 @@ class Component extends DCLogic {
     const q = (this.state.input||'').trim();
     if(!q || this.state.thinking) return;
     const cid = this.state.currentId || ('c' + Date.now());
+    const priorMessages = this.state.messages; // snapshot BEFORE this question is appended
     this.setState(st => ({ currentId:cid, messages:[...st.messages, {role:'user', text:q}], input:'', thinking:true }));
-    const ans = await this.fetchAnswer(q);
+    const ans = await this.fetchAnswer(q, priorMessages);
     this.setState(st => ({ messages:[...st.messages, ans], thinking:false }), () => this.upsertCurrent());
   }
   ask(q){ this.setState({ input:q }, () => this.send()); }

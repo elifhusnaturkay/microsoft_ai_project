@@ -414,11 +414,37 @@ def translate_query_for_retrieval(question: str, backend: ChatBackend) -> str:
     return translated or question
 
 
+def build_history_block(history: Optional[List[Dict]]) -> str:
+    """Render prior chat turns as a "Conversation so far" block so the model can resolve
+    follow-ups ("peki ya vize icin?") against what was just discussed. Trimmed to the last
+    config.MAX_HISTORY_MESSAGES entries (most recent kept) -- retrieval for THIS question
+    still runs fresh against the current question alone (see server.py's ask()); history
+    only feeds the answering call, not what gets retrieved. Each entry is expected as
+    {"role": "user"|"assistant", "text": str}; malformed/empty entries are skipped rather
+    than raising, since this comes straight from client-supplied JSON (server.py's
+    AskRequest.history)."""
+    if not history:
+        return ""
+    trimmed = history[-config.MAX_HISTORY_MESSAGES:]
+    lines = []
+    for msg in trimmed:
+        role = msg.get("role")
+        text = (msg.get("text") or "").strip()
+        if role not in ("user", "assistant") or not text:
+            continue
+        label = "Student" if role == "user" else "Assistant"
+        lines.append(f"{label}: {text}")
+    if not lines:
+        return ""
+    return "Conversation so far:\n" + "\n".join(lines) + "\n\n"
+
+
 def answer_query(
     question: str,
     chunks: List[Dict],
     language: str = "tr",
     backend: Optional[ChatBackend] = None,
+    history: Optional[List[Dict]] = None,
 ) -> Dict:
     """Assemble the prompt from retrieved chunks + question, call the chat backend, and
     return {"segments": [...], "sources": [...]} -- the shape static/index.html's chat UI
@@ -426,7 +452,7 @@ def answer_query(
     backend = backend or get_chat_backend()
     system_prompt = get_system_prompt(language)
     context, sources = build_context_and_sources(chunks)
-    user_prompt = f"Context:\n{context}\n\nQuestion: {question}"
+    user_prompt = f"{build_history_block(history)}Context:\n{context}\n\nQuestion: {question}"
 
     raw_answer = backend.generate(system_prompt, user_prompt, max_tokens=config.MAX_ANSWER_TOKENS)
     segments = parse_segments(raw_answer, num_sources=len(sources))

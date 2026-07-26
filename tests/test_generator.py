@@ -6,6 +6,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from rag import config
 from rag.generator import (
     ContentBlocked,
     FoundryLocalChat,
@@ -13,6 +14,7 @@ from rag.generator import (
     OllamaChat,
     answer_query,
     build_context_and_sources,
+    build_history_block,
     get_chat_backend,
     parse_segments,
     translate_query_for_retrieval,
@@ -87,6 +89,66 @@ def test_parse_segments_out_of_range_number_is_left_as_literal_text():
     # produce a chip pointing at a nonexistent source.
     segments = parse_segments("Some fact [5].", num_sources=2)
     assert segments == [{"txt": "Some fact [5]."}]
+
+
+def test_build_history_block_renders_prior_turns_with_role_labels():
+    history = [
+        {"role": "user", "text": "What documents do I need?"},
+        {"role": "assistant", "text": "You need a transcript and a bank statement [1]."},
+    ]
+    block = build_history_block(history)
+    assert block == (
+        "Conversation so far:\n"
+        "Student: What documents do I need?\n"
+        "Assistant: You need a transcript and a bank statement [1].\n\n"
+    )
+
+
+def test_build_history_block_empty_for_no_history():
+    assert build_history_block(None) == ""
+    assert build_history_block([]) == ""
+
+
+def test_build_history_block_skips_malformed_entries_without_raising():
+    # history comes straight from client JSON (server.py's AskRequest.history) -- a
+    # missing/blank text or unexpected role must not crash the request.
+    history = [
+        {"role": "user", "text": "  "},
+        {"role": "bot", "text": "invalid role"},
+        {"text": "no role at all"},
+        {"role": "user", "text": "real question"},
+    ]
+    assert build_history_block(history) == "Conversation so far:\nStudent: real question\n\n"
+
+
+def test_build_history_block_trims_to_max_history_messages(monkeypatch):
+    monkeypatch.setattr(config, "MAX_HISTORY_MESSAGES", 2)
+    history = [
+        {"role": "user", "text": "first question"},
+        {"role": "assistant", "text": "first answer"},
+        {"role": "user", "text": "second question"},
+        {"role": "assistant", "text": "second answer"},
+    ]
+    block = build_history_block(history)
+    assert "first question" not in block
+    assert "first answer" not in block
+    assert "second question" in block
+    assert "second answer" in block
+
+
+def test_answer_query_folds_history_into_the_prompt_before_context():
+    chunks = [
+        {"text": "Tuition is $41,860.", "source_file": "a.md", "sources": [{"name": "Cost", "url": "https://x/a"}]},
+    ]
+    history = [{"role": "user", "text": "Hi, I'm Ahmet"}, {"role": "assistant", "text": "Hi Ahmet!"}]
+
+    class FakeBackend:
+        def generate(self, system_prompt, user_prompt, max_tokens=None):
+            assert user_prompt.startswith("Conversation so far:\nStudent: Hi, I'm Ahmet\nAssistant: Hi Ahmet!\n\nContext:")
+            return "It's $41,860 [1]."
+
+    result = answer_query("What's the cost?", chunks, language="en", backend=FakeBackend(), history=history)
+    assert result["segments"] == [{"txt": "It's $41,860 "}, {"c": 1}, {"txt": "."}]
 
 
 def test_answer_query_returns_segments_and_sources_shape():

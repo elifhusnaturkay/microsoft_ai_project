@@ -1,0 +1,13 @@
+[tool.ruff]
+# Matches this codebase's existing style: long "why"-explaining comments/docstrings
+# (see CLAUDE.md) routinely run past ruff's 88-char default -- 130 is the smallest
+# width that lets the current codebase pass unchanged (see tests/test_generator.py).
+line-length = 130
+
+[tool.ruff.lint]
+# Scoped to pycodestyle errors + pyflakes only. Broader rule groups (pyupgrade,
+# flake8-bandit, flake8-blind-except, ...) flag long-standing project conventions
+# (typing.List/Dict type hints, deliberate broad `except Exception` for resilience
+# at process boundaries -- see rag/store.py, server.py) as violations; a project-wide
+# rewrite of those conventions is out of scope for this change.
+select = ["E", "F"]

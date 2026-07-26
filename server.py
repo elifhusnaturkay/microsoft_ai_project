@@ -15,13 +15,14 @@ import time
 from collections import defaultdict, deque
 from pathlib import Path
 from threading import Lock, local
+from typing import List
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from rag import config, store
+from rag import config, query_log, store
 from rag.embedder import get_embedder
 from rag.generator import ContentBlocked, answer_query, get_chat_backend, translate_query_for_retrieval
 from rag.retriever import get_top_chunks
@@ -65,6 +66,7 @@ app = FastAPI(title="SHSU Transfer Assistant")
 
 _embedder = None
 _db_conn_local = local()
+_query_log_conn_local = local()
 
 
 def _get_embedder():
@@ -72,6 +74,14 @@ def _get_embedder():
     if _embedder is None:
         _embedder = get_embedder()
     return _embedder
+
+
+def _get_query_log_conn():
+    """One SQLite connection per thread -- same reasoning as _get_db_connection below
+    (ask() runs in a FastAPI thread-pool worker, not always the thread that opened it)."""
+    if not hasattr(_query_log_conn_local, "conn"):
+        _query_log_conn_local.conn = query_log.init_db(config.QUERY_LOG_DB_PATH)
+    return _query_log_conn_local.conn
 
 
 def _get_db_connection():
@@ -95,12 +105,23 @@ def _get_db_connection():
     return _db_conn_local.conn
 
 
+class HistoryMessage(BaseModel):
+    role: str
+    text: str = Field(max_length=2000)
+
+
 class AskRequest(BaseModel):
     # Bounded so an unauthenticated caller can't send an arbitrarily large body -- each
     # question triggers a billed embedding + completion call against the configured backend.
     # 2000 chars is generous for a chat question while keeping a single request cheap.
     question: str = Field(max_length=2000)
     language: str = "tr"
+    # Prior turns of the CURRENT chat (static/index.html sends its own client-side message
+    # list) so follow-up questions can refer back to what was just discussed -- see
+    # rag/generator.py's build_history_block. Bounded independently of config.
+    # MAX_HISTORY_MESSAGES (which trims from the *end*) so a caller can't force this app to
+    # hold an arbitrarily large request body in memory regardless of what's actually used.
+    history: List[HistoryMessage] = Field(default_factory=list, max_length=50)
 
 
 # Per-IP sliding-window rate limit for POST /api/ask, kept dependency-free (no slowapi/redis)
@@ -146,6 +167,18 @@ def _check_rate_limit(client_ip: str) -> bool:
         return True
 
 
+def _log_query(question: str, language: str, num_sources: int, was_answered: bool) -> None:
+    """Best-effort durable log of a question asked through /api/ask (see rag/query_log.py).
+    Never allowed to break the request it's logging -- a full disk or similar here would
+    otherwise turn an observability nice-to-have into a user-facing failure, so any error
+    is swallowed and only surfaced via a warning log."""
+    try:
+        conn = _get_query_log_conn()
+        query_log.insert_query(conn, question, language, num_sources, was_answered)
+    except Exception:
+        logger.warning("Failed to record query log entry", exc_info=True)
+
+
 @app.post("/api/ask")
 def ask(request: AskRequest, http_request: Request = None):
     # http_request defaults to None so existing direct-call unit tests (server.ask(AskRequest(...)))
@@ -184,10 +217,19 @@ def ask(request: AskRequest, http_request: Request = None):
         # ignore the (empty) sources per the system prompt. Genuinely off-topic questions
         # (not a greeting match) keep the original behavior below.
         if not chunks and not _looks_like_greeting(question):
+            _log_query(question, language, num_sources=0, was_answered=False)
             return {"segments": [], "sources": []}
 
-        return answer_query(question, chunks, language=language, backend=chat_backend)
+        history = [{"role": m.role, "text": m.text} for m in request.history]
+        response = answer_query(question, chunks, language=language, backend=chat_backend, history=history)
+        _log_query(
+            question, language,
+            num_sources=len(response.get("sources", [])),
+            was_answered=bool(response.get("segments")),
+        )
+        return response
     except ContentBlocked:
+        _log_query(question, language, num_sources=0, was_answered=True)
         return {"segments": [{"txt": REFUSAL_TEXT[language]}], "sources": []}
     except Exception as e:
         # Any failure here means the configured chat/embedding backend (local Foundry
@@ -196,6 +238,7 @@ def ask(request: AskRequest, http_request: Request = None):
         # frontend's existing "couldn't reach the chat backend" message (static/index.html's
         # fetchAnswer) is accurate, and log the real cause for whoever's diagnosing it.
         logger.exception("Chat backend failed while answering a question: %s: %s", type(e).__name__, e)
+        _log_query(question, language, num_sources=0, was_answered=False)
         if _is_gemini_quota_error(e):
             raise HTTPException(
                 status_code=429,

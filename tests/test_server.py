@@ -1,6 +1,8 @@
 """Unit tests for server.py's /api/ask handler: the MIN_SIMILARITY relevance filter and
 the backend-unavailable -> 503 error path."""
+import sqlite3
 import sys
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -10,7 +12,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import server
-from rag import config
+from rag import config, query_log
 from rag.generator import ContentBlocked
 
 
@@ -24,6 +26,26 @@ def _patch_pipeline(monkeypatch, chunks):
     monkeypatch.setattr(server, "_get_embedder", lambda: object())
     monkeypatch.setattr(server, "_get_db_connection", lambda: object())
     monkeypatch.setattr(server, "get_top_chunks", lambda *a, **k: chunks)
+
+
+@pytest.fixture
+def query_log_db(monkeypatch, tmp_path):
+    """Points server.py's query-log connection at a throwaway DB file per test, separate
+    from knowledge.db (see rag/config.py's QUERY_LOG_DB_PATH), and gives it a fresh
+    thread-local so no state leaks in from a previous test."""
+    db_path = tmp_path / "queries.db"
+    monkeypatch.setattr(config, "QUERY_LOG_DB_PATH", str(db_path))
+    monkeypatch.setattr(server, "_query_log_conn_local", threading.local())
+    return db_path
+
+
+def _read_query_log_rows(db_path):
+    conn = sqlite3.connect(str(db_path))
+    rows = conn.execute(
+        "SELECT question, language, num_sources, was_answered FROM query_log"
+    ).fetchall()
+    conn.close()
+    return rows
 
 
 def test_ask_returns_empty_when_best_chunk_is_below_min_similarity(monkeypatch):
@@ -48,7 +70,9 @@ def test_ask_keeps_chunks_at_or_above_min_similarity(monkeypatch):
     _patch_pipeline(monkeypatch, chunks)
     monkeypatch.setattr(
         server, "answer_query",
-        lambda question, kept_chunks, language, backend: {"segments": [{"txt": "ok"}], "sources": [], "_kept": kept_chunks},
+        lambda question, kept_chunks, language, backend, history=None: {
+            "segments": [{"txt": "ok"}], "sources": [], "_kept": kept_chunks,
+        },
     )
 
     result = server.ask(server.AskRequest(question="how much is tuition?", language="en"))
@@ -62,7 +86,7 @@ def test_ask_drops_only_the_chunks_below_threshold(monkeypatch):
     _patch_pipeline(monkeypatch, [good, bad])
     monkeypatch.setattr(
         server, "answer_query",
-        lambda question, kept_chunks, language, backend: {"segments": [], "sources": [], "_kept": kept_chunks},
+        lambda question, kept_chunks, language, backend, history=None: {"segments": [], "sources": [], "_kept": kept_chunks},
     )
 
     result = server.ask(server.AskRequest(question="how much is tuition?", language="en"))
@@ -104,7 +128,7 @@ def test_ask_routes_greetings_to_the_model_instead_of_the_empty_short_circuit(mo
     _patch_pipeline(monkeypatch, chunks)
     monkeypatch.setattr(
         server, "answer_query",
-        lambda q, kept_chunks, language, backend: {"segments": [{"txt": "warm greeting"}], "sources": []},
+        lambda q, kept_chunks, language, backend, history=None: {"segments": [{"txt": "warm greeting"}], "sources": []},
     )
 
     result = server.ask(server.AskRequest(question=question, language=language))
@@ -185,7 +209,7 @@ def test_ask_returns_refusal_text_when_backend_blocks_content(monkeypatch):
                "sources": [{"name": "A", "url": "https://x/a"}]}]
     _patch_pipeline(monkeypatch, chunks)
 
-    def raise_blocked(question, kept_chunks, language, backend):
+    def raise_blocked(question, kept_chunks, language, backend, history=None):
         raise ContentBlocked("Gemini declined to respond (finish_reason=SAFETY)")
 
     monkeypatch.setattr(server, "answer_query", raise_blocked)
@@ -335,3 +359,94 @@ def test_get_db_connection_gives_each_thread_its_own_connection(monkeypatch, tmp
     assert errors == []
     assert len(connections) == 6
     assert len({id(c) for c in connections}) == 6  # each thread got its own connection
+
+
+# --- Query logging (rag/query_log.py): every question asked through /api/ask must be
+# durably recorded, on every exit path, without ever breaking the response it's logging.
+
+def test_ask_logs_a_successful_answer_with_its_source_count(monkeypatch, query_log_db):
+    chunks = [{"text": "Relevant.", "source_file": "a.md", "similarity": config.MIN_SIMILARITY,
+               "sources": [{"name": "A", "url": "https://x/a"}]}]
+    _patch_pipeline(monkeypatch, chunks)
+    monkeypatch.setattr(
+        server, "answer_query",
+        lambda question, kept_chunks, language, backend, history=None: {
+            "segments": [{"txt": "Tuition is $X."}],
+            "sources": [{"name": "A", "url": "https://x/a"}, {"name": "B", "url": "https://x/b"}],
+        },
+    )
+
+    result = server.ask(server.AskRequest(question="how much is tuition?", language="en"))
+
+    assert result["segments"]
+    rows = _read_query_log_rows(query_log_db)
+    assert rows == [("how much is tuition?", "en", 2, 1)]
+
+
+def test_ask_logs_an_off_topic_question_as_unanswered(monkeypatch, query_log_db):
+    chunks = [
+        {"text": "Irrelevant.", "source_file": "a.md", "similarity": config.MIN_SIMILARITY - 0.01, "sources": []},
+    ]
+    _patch_pipeline(monkeypatch, chunks)
+
+    result = server.ask(server.AskRequest(question="what's a good cookie recipe?", language="en"))
+
+    assert result == {"segments": [], "sources": []}
+    rows = _read_query_log_rows(query_log_db)
+    assert rows == [("what's a good cookie recipe?", "en", 0, 0)]
+
+
+def test_ask_survives_a_query_log_failure_and_still_returns_the_real_answer(monkeypatch, query_log_db, caplog):
+    chunks = [{"text": "Relevant.", "source_file": "a.md", "similarity": config.MIN_SIMILARITY,
+               "sources": [{"name": "A", "url": "https://x/a"}]}]
+    _patch_pipeline(monkeypatch, chunks)
+    monkeypatch.setattr(
+        server, "answer_query",
+        lambda question, kept_chunks, language, backend, history=None: {"segments": [{"txt": "ok"}], "sources": []},
+    )
+
+    def raise_disk_full(*a, **k):
+        raise sqlite3.OperationalError("disk full")
+
+    monkeypatch.setattr(query_log, "insert_query", raise_disk_full)
+
+    with caplog.at_level("WARNING"):
+        result = server.ask(server.AskRequest(question="how much is tuition?", language="en"))
+
+    assert result == {"segments": [{"txt": "ok"}], "sources": []}
+    assert any("query log" in r.getMessage().lower() for r in caplog.records)
+
+
+def test_ask_passes_client_supplied_history_through_to_answer_query(monkeypatch):
+    chunks = [{"text": "Relevant.", "source_file": "a.md", "similarity": config.MIN_SIMILARITY, "sources": []}]
+    _patch_pipeline(monkeypatch, chunks)
+    captured = {}
+
+    def fake_answer_query(question, kept_chunks, language, backend, history=None):
+        captured["history"] = history
+        return {"segments": [], "sources": []}
+
+    monkeypatch.setattr(server, "answer_query", fake_answer_query)
+
+    server.ask(server.AskRequest(
+        question="and the housing cost?",
+        language="en",
+        history=[
+            {"role": "user", "text": "What's the tuition?"},
+            {"role": "assistant", "text": "It's $41,860."},
+        ],
+    ))
+
+    assert captured["history"] == [
+        {"role": "user", "text": "What's the tuition?"},
+        {"role": "assistant", "text": "It's $41,860."},
+    ]
+
+
+def test_ask_request_rejects_more_than_50_history_messages():
+    with pytest.raises(Exception):  # pydantic.ValidationError
+        server.AskRequest(
+            question="hi",
+            language="en",
+            history=[{"role": "user", "text": "x"} for _ in range(51)],
+        )
