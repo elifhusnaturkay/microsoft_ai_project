@@ -395,7 +395,11 @@ class Component extends DCLogic {
       }
     } catch(e){}
   }
-  componentDidUpdate(){ if(this.threadEl){ this.threadEl.scrollTop = this.threadEl.scrollHeight; } }
+  // Only auto-scroll once there's an actual conversation -- unconditionally scrolling
+  // to scrollHeight also fired on the welcome/suggestions screen (messages still []),
+  // which on short viewports (mobile) landed users mid-way down the suggestion cards
+  // instead of at the greeting/mascot the page actually starts with.
+  componentDidUpdate(){ if(this.threadEl && this.state.messages.length){ this.threadEl.scrollTop = this.threadEl.scrollHeight; } }
 
   // Real backend call: rag/retriever.py + rag/generator.py via server.py's /api/ask.
   // Returns {"segments":[{"txt":...} | {"c": n}, ...], "sources":[{"name","url"}, ...]}
