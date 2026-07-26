@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 import server
 from rag import config
@@ -137,3 +138,50 @@ def test_ask_returns_503_when_retrieval_fails(monkeypatch):
         server.ask(server.AskRequest(question="how much is tuition?", language="en"))
 
     assert exc_info.value.status_code == 503
+
+
+# --- S-02: question length cap + per-IP rate limiting ------------------------------------
+# These go through the real ASGI/TestClient path (not a direct server.ask(...) call) because
+# both defenses live at the HTTP boundary: the length cap is a pydantic body-validation error
+# FastAPI only raises during request parsing, and the rate limiter only activates when a real
+# Request is injected (see ask()'s http_request param).
+
+@pytest.fixture
+def client(monkeypatch):
+    _patch_pipeline(monkeypatch, chunks=[])
+    server._request_log.clear()
+    yield TestClient(server.app)
+    server._request_log.clear()
+
+
+def test_question_over_max_length_returns_422(client):
+    response = client.post("/api/ask", json={"question": "a" * 2001, "language": "en"})
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["body", "question"]
+
+
+def test_question_at_max_length_is_accepted(client):
+    response = client.post("/api/ask", json={"question": "a" * 2000, "language": "en"})
+
+    assert response.status_code == 200
+
+
+def test_rate_limit_returns_429_after_threshold_exceeded_within_window(client):
+    for _ in range(server.RATE_LIMIT_MAX_REQUESTS):
+        response = client.post("/api/ask", json={"question": "hi", "language": "en"})
+        assert response.status_code == 200
+
+    over_limit_response = client.post("/api/ask", json={"question": "hi", "language": "en"})
+
+    assert over_limit_response.status_code == 429
+    assert "Too many requests" in over_limit_response.json()["detail"]
+
+
+def test_rate_limit_is_scoped_per_ip(monkeypatch, client):
+    for _ in range(server.RATE_LIMIT_MAX_REQUESTS):
+        client.post("/api/ask", json={"question": "hi", "language": "en"})
+    assert client.post("/api/ask", json={"question": "hi", "language": "en"}).status_code == 429
+
+    # A different client IP should not be affected by the first client's exhausted quota.
+    assert server._check_rate_limit("203.0.113.7") is True
