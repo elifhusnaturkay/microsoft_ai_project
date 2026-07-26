@@ -15,6 +15,11 @@ DB_PATH = os.environ.get("RAG_DB_PATH", str(PROJECT_ROOT / "knowledge.db"))
 # the chunks table in DB_PATH on every deploy (--reset), and query_log must survive that.
 QUERY_LOG_DB_PATH = os.environ.get("RAG_QUERY_LOG_DB_PATH", str(PROJECT_ROOT / "queries.db"))
 
+# Gates GET /api/admin/queries (server.py). Empty by default -- an unset env var must leave
+# the endpoint fully disabled, not just unauthenticated, so this must never be compared with
+# `== ""` against a caller-supplied empty token (see server.py's constant-time check).
+ADMIN_TOKEN = os.environ.get("RAG_ADMIN_TOKEN", "")
+
 # Retrieval
 TOP_K = int(os.environ.get("RAG_TOP_K", "3"))
 

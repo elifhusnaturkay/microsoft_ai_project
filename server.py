@@ -11,6 +11,7 @@ Run with: uvicorn server:app --reload
 """
 import logging
 import re
+import secrets
 import time
 from collections import defaultdict, deque
 from pathlib import Path
@@ -181,19 +182,27 @@ def _log_query(question: str, language: str, num_sources: int, was_answered: boo
 
 @app.post("/api/ask")
 def ask(request: AskRequest, http_request: Request = None):
+    # Parsed before the rate-limit check below (pure string ops, no side effects) so a
+    # rate-limited question can still be logged -- otherwise what someone was asking when
+    # they got throttled would never show up in the query log at all.
+    question = request.question.strip()
+    language = request.language if request.language in ("tr", "en") else "tr"
+
     # http_request defaults to None so existing direct-call unit tests (server.ask(AskRequest(...)))
     # keep working without a real ASGI request; FastAPI itself always injects the real Request
     # for actual HTTP traffic, which is the only path rate-limiting needs to cover.
     if http_request is not None:
         client_ip = http_request.client.host if http_request.client else "unknown"
         if not _check_rate_limit(client_ip):
+            # An empty question doesn't count as a real question anywhere else in this
+            # function (see the short-circuit below), so it's not logged here either.
+            if question:
+                _log_query(question, language, num_sources=0, was_answered=False)
             raise HTTPException(
                 status_code=429,
                 detail="Too many requests -- please wait a minute before asking again.",
             )
 
-    question = request.question.strip()
-    language = request.language if request.language in ("tr", "en") else "tr"
     if not question:
         return {"segments": [], "sources": []}
 
@@ -261,6 +270,36 @@ def index() -> HTMLResponse:
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     html = html.replace("__RAG_CHAT_BACKEND_VALUE__", config.CHAT_BACKEND)
     return HTMLResponse(html)
+
+
+# Upper bound on GET /api/admin/queries's ?limit= so a valid token still can't force this
+# process to load the entire query_log table into memory in one response.
+MAX_ADMIN_QUERY_LIMIT = 1000
+
+
+def _admin_token_is_valid(token: str) -> bool:
+    """Constant-time token check (secrets.compare_digest, not `==`) so response timing can't
+    leak how many leading characters of RAG_ADMIN_TOKEN a guess got right. An unset
+    config.ADMIN_TOKEN (the default) must never match, including an empty caller-supplied
+    token -- compare_digest("", "") is True, so that case is rejected explicitly first."""
+    if not config.ADMIN_TOKEN:
+        return False
+    return secrets.compare_digest(token, config.ADMIN_TOKEN)
+
+
+@app.get("/api/admin/queries", include_in_schema=False)
+def admin_queries(token: str = "", limit: int = 100):
+    # 404, not 401/403: a wrong-credentials response would confirm this endpoint exists at
+    # all, which is itself information worth not giving an unauthenticated caller (this
+    # process logs every question asked through /api/ask, including ones users may consider
+    # sensitive) -- so an invalid/missing token looks identical to a route that was never
+    # registered.
+    if not _admin_token_is_valid(token):
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    bounded_limit = max(1, min(limit, MAX_ADMIN_QUERY_LIMIT))
+    conn = _get_query_log_conn()
+    return {"queries": query_log.get_recent_queries(conn, limit=bounded_limit)}
 
 
 # Registered last: explicit routes above (like /api/ask and /) always win over this
