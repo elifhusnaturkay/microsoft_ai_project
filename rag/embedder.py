@@ -19,6 +19,7 @@ below matches that API exactly. Note: foundry-local-sdk had a breaking API redes
 1.0.0 (package renamed foundry_local_sdk, singleton Configuration/native-interop design) --
 this module is written against the pre-1.0 API on purpose, see requirements.txt.
 """
+import time
 from abc import ABC, abstractmethod
 from typing import List, Sequence
 
@@ -137,11 +138,36 @@ class GeminiEmbedder(Embedder):
     def embed(self, texts: Sequence[str]) -> np.ndarray:
         self._ensure_client()
 
+        # Every /api/ask call embeds its query here BEFORE the chat call even runs --
+        # so a transient failure on this step fails the whole request no matter how
+        # well the chat step (rag/generator.py's GeminiChat) tolerates blips. This retry
+        # mirrors GeminiChat._call_with_retry for the same reason (see its docstring and
+        # .claude/HANDOFF.md's 2026-07-26 incident, where retrying only the chat step
+        # left this one as an unprotected single point of failure).
         vectors: List[List[float]] = []
         for text in texts:
-            result = self._client.models.embed_content(model=self.model_name, contents=text)
+            result = self._call_with_retry(
+                lambda t=text: self._client.models.embed_content(model=self.model_name, contents=t)
+            )
             vectors.append(result.embeddings[0].values)
         return np.array(vectors, dtype=np.float32)
+
+    @staticmethod
+    def _call_with_retry(fn, max_attempts: int = 3, backoff_seconds: float = 1.5):
+        """See rag/generator.py's GeminiChat._call_with_retry -- identical policy,
+        duplicated rather than shared since embedder.py and generator.py already
+        maintain parallel, independent backend implementations by design (see this
+        module's docstring)."""
+        from google.genai.errors import APIError
+
+        retryable_codes = {429, 500, 503, 504}
+        for attempt in range(max_attempts):
+            try:
+                return fn()
+            except APIError as e:
+                if e.code not in retryable_codes or attempt == max_attempts - 1:
+                    raise
+                time.sleep(backoff_seconds * (attempt + 1))
 
 
 def get_embedder(backend: str = None) -> Embedder:
