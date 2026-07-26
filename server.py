@@ -10,6 +10,7 @@ Run with: uvicorn server:app --reload
 (Requires knowledge.db to already exist -- run `python scripts/ingest.py` first.)
 """
 import logging
+import re
 import time
 from collections import defaultdict, deque
 from pathlib import Path
@@ -28,6 +29,30 @@ from rag.retriever import get_top_chunks
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 logger = logging.getLogger(__name__)
+
+# Small talk/greetings ("ne naber", "hey", "merhaba") have no semantic overlap with the
+# transfer-process docs, so retrieval always scores them below MIN_SIMILARITY -- without
+# this check they'd hit the empty short-circuit below before the chat model, which already
+# has greeting-handling instructions in its system prompt (see rag/generator.py's
+# SYSTEM_PROMPT_TR/EN), ever runs. Matched as the WHOLE normalized message, not a
+# substring/keyword scan, so a real question that happens to start with a greeting word
+# (e.g. "hi, how much is tuition?") still goes through retrieval normally and can still
+# get the correct "I don't have information on that" refusal if it's genuinely off-topic.
+_GREETING_PHRASES = {
+    "hi", "hey", "hello", "hiya", "yo", "sup", "howdy",
+    "what's up", "whats up", "how are you", "how's it going", "hows it going",
+    "good morning", "good afternoon", "good evening",
+    "naber", "n'aber", "ne naber", "ne haber", "nasilsin", "nasılsın",
+    "nasilsiniz", "nasılsınız", "selam", "selamlar", "merhaba", "merhabalar",
+    "gunaydin", "günaydın", "iyi aksamlar", "iyi akşamlar", "iyi geceler",
+}
+
+
+def _looks_like_greeting(question: str) -> bool:
+    """True for short small-talk openers matched against the WHOLE (normalized)
+    message -- see _GREETING_PHRASES above for why this must not be a substring scan."""
+    normalized = re.sub(r"[!.,?¿¡]+$", "", question.strip().lower()).strip()
+    return normalized in _GREETING_PHRASES
 
 # Shown when a backend's own safety layer refuses a request (see rag/generator.py's
 # ContentBlocked) -- a deliberate response, not the generic "backend unavailable" error.
@@ -123,7 +148,11 @@ def ask(request: AskRequest, http_request: Request = None):
         conn = _get_db_connection()
         chunks = get_top_chunks(retrieval_query, embedder, conn, k=config.TOP_K)
         chunks = [c for c in chunks if c["similarity"] >= config.MIN_SIMILARITY]
-        if not chunks:
+        # A greeting still short-circuits an empty *retrieval* result, but not the model
+        # call itself -- the model has its own greeting-handling instructions and will
+        # ignore the (empty) sources per the system prompt. Genuinely off-topic questions
+        # (not a greeting match) keep the original behavior below.
+        if not chunks and not _looks_like_greeting(question):
             return {"segments": [], "sources": []}
 
         return answer_query(question, chunks, language=language, backend=chat_backend)

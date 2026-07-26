@@ -82,6 +82,58 @@ def test_ask_returns_empty_when_all_chunks_below_threshold(monkeypatch):
     assert result == {"segments": [], "sources": []}
 
 
+# --- R-02: a greeting/small-talk opener has no semantic similarity to the transfer-process
+# docs, so retrieval always scores it below MIN_SIMILARITY -- it must still reach the chat
+# model (which has its own greeting-handling instructions, see rag/generator.py's
+# SYSTEM_PROMPT_TR/EN) instead of hitting the empty short-circuit before the model ever runs.
+
+@pytest.mark.parametrize("question,language", [
+    ("ne naber", "tr"),
+    ("naber", "tr"),
+    ("merhaba", "tr"),
+    ("hey", "en"),
+    ("hi", "en"),
+    ("what's up", "en"),
+])
+def test_ask_routes_greetings_to_the_model_instead_of_the_empty_short_circuit(monkeypatch, question, language):
+    # No chunk clears MIN_SIMILARITY -- same retrieval outcome as a genuinely off-topic
+    # question, but this one must NOT hit the empty short-circuit.
+    chunks = [
+        {"text": "Irrelevant.", "source_file": "a.md", "similarity": config.MIN_SIMILARITY - 0.01, "sources": []},
+    ]
+    _patch_pipeline(monkeypatch, chunks)
+    monkeypatch.setattr(
+        server, "answer_query",
+        lambda q, kept_chunks, language, backend: {"segments": [{"txt": "warm greeting"}], "sources": []},
+    )
+
+    result = server.ask(server.AskRequest(question=question, language=language))
+
+    assert result == {"segments": [{"txt": "warm greeting"}], "sources": []}
+
+
+def test_ask_still_returns_empty_for_genuinely_off_topic_question(monkeypatch):
+    # Guards against the greeting heuristic over-firing: a real (if silly) question that
+    # is not a greeting match must keep the original "I don't have information" behavior.
+    chunks = [
+        {"text": "Irrelevant.", "source_file": "a.md", "similarity": config.MIN_SIMILARITY - 0.01, "sources": []},
+    ]
+    _patch_pipeline(monkeypatch, chunks)
+
+    result = server.ask(server.AskRequest(question="what's a good cookie recipe?", language="en"))
+
+    assert result == {"segments": [], "sources": []}
+
+
+def test_looks_like_greeting_does_not_match_a_real_question_with_a_greeting_prefix():
+    # "hi" followed by an actual question must still go through retrieval normally --
+    # this is a whole-message match, not a substring/keyword scan.
+    assert server._looks_like_greeting("hi, how much is tuition?") is False
+    assert server._looks_like_greeting("hi") is True
+    assert server._looks_like_greeting("Hi!") is True
+    assert server._looks_like_greeting("  Merhaba  ") is True
+
+
 def test_ask_returns_503_when_the_chat_backend_is_unreachable(monkeypatch, caplog):
     def raise_connection_error():
         raise ConnectionError("Gemini API key missing or invalid")
