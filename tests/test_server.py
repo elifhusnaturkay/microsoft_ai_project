@@ -158,6 +158,26 @@ def test_ask_returns_503_when_the_chat_backend_is_unreachable(monkeypatch, caplo
     assert "ollama" not in log_message.lower()
 
 
+def test_ask_returns_429_when_gemini_quota_is_exhausted(monkeypatch, caplog):
+    # A 429 from Gemini (shared prod GEMINI_API_KEY hitting a rate/quota limit under
+    # concurrent load) is transient and self-resolving -- it must surface distinctly
+    # from a real backend outage, not collapse into the same generic 503 (see
+    # .claude/HANDOFF.md's 2026-07-26 note: this exact ambiguity delayed diagnosis).
+    from google.genai.errors import ClientError
+
+    def raise_quota_error():
+        raise ClientError(429, {"message": "Resource exhausted", "status": "RESOURCE_EXHAUSTED"})
+
+    monkeypatch.setattr(server, "get_chat_backend", raise_quota_error)
+
+    with caplog.at_level("ERROR"):
+        with pytest.raises(HTTPException) as exc_info:
+            server.ask(server.AskRequest(question="how much is tuition?", language="en"))
+
+    assert exc_info.value.status_code == 429
+    assert "rate-limited" in exc_info.value.detail
+
+
 def test_ask_returns_refusal_text_when_backend_blocks_content(monkeypatch):
     # A backend's own safety layer refusing a request is a deliberate response, not an
     # outage -- this should surface as 200 + REFUSAL_TEXT, not the generic 503 path.

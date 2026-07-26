@@ -100,6 +100,23 @@ _rate_limit_lock = Lock()
 _request_log: dict = defaultdict(deque)
 
 
+def _is_gemini_quota_error(e: Exception) -> bool:
+    """True for the Gemini SDK's 429 (RESOURCE_EXHAUSTED/quota) error specifically --
+    distinguishing it from a genuine backend outage matters because it's transient and
+    self-resolving, not a bug to page someone about. Before this, both collapsed into the
+    same generic 503 in the except-block below, which is exactly what made a real quota
+    exhaustion (from concurrent testing against the shared prod GEMINI_API_KEY) look
+    identical to the actual "gemini-2.5-flash retired" outage it had just been fixed
+    from -- see .claude/HANDOFF.md's 2026-07-26 note. google-genai is imported lazily
+    here (not at module level) so this stays a no-op for the foundry/ollama backends,
+    matching rag/generator.py's own lazy-import pattern for the same package."""
+    try:
+        from google.genai.errors import APIError
+    except ImportError:
+        return False
+    return isinstance(e, APIError) and e.code == 429
+
+
 def _check_rate_limit(client_ip: str) -> bool:
     """Record a request from client_ip and return whether it's within the allowed rate.
     Returns False (and does NOT record the request) once client_ip already has
@@ -165,6 +182,11 @@ def ask(request: AskRequest, http_request: Request = None):
         # frontend's existing "couldn't reach the chat backend" message (static/index.html's
         # fetchAnswer) is accurate, and log the real cause for whoever's diagnosing it.
         logger.exception("Chat backend failed while answering a question: %s: %s", type(e).__name__, e)
+        if _is_gemini_quota_error(e):
+            raise HTTPException(
+                status_code=429,
+                detail="Chat backend is rate-limited -- please wait a minute before asking again.",
+            )
         raise HTTPException(status_code=503, detail="Chat backend unavailable")
 
 
