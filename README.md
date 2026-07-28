@@ -155,8 +155,8 @@ flowchart TD
 [inference backends](#inference-backends) below.
 
 ```bash
-git clone https://github.com/elifhusnaturkay/microsoft_ai_project.git
-cd microsoft_ai_project
+git clone https://github.com/elifhusnaturkay/Bearkat_Transfer_Assistant.git
+cd Bearkat_Transfer_Assistant
 pip install -r requirements.txt
 ```
 
